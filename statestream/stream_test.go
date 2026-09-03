@@ -23,6 +23,10 @@ type wsServer struct {
 	accepts atomic.Int32
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // newWSServer runs handler for every accepted WebSocket connection.
 func newWSServer(t *testing.T, handler func(conn *websocket.Conn, n int32)) *wsServer {
 	t.Helper()
@@ -55,6 +59,20 @@ func inputState(t *testing.T) []byte {
 		{State: &pb.StateUpdate_Input{Input: &pb.InputEvent{Event: &pb.InputEvent_ButtonEvent{ButtonEvent: &pb.ButtonEvent{Button: pb.Button_BACK}}}}},
 		{State: &pb.StateUpdate_Frame{Frame: &pb.Frame{Width: 4, Height: 1, Encoding: pb.Encoding_RUN_LENGTH, PixelFormat: pb.PixelFormat_RGB888, Data: []byte{0x81, 1, 2, 3, 0x03, 9, 9, 9}}}},
 	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func inputStateAt(t *testing.T, timestamp uint64) []byte {
+	t.Helper()
+	var state pb.State
+	if err := proto.Unmarshal(inputState(t), &state); err != nil {
+		t.Fatal(err)
+	}
+	state.Timestamp = timestamp
+	b, err := proto.Marshal(&state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,6 +202,25 @@ func TestStartTimesOutWhenRemoteNeverAuthenticates(t *testing.T) {
 	}
 }
 
+func TestStopCancelsStart(t *testing.T) {
+	dialing := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(dialing)
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	s, _ := NewLocal(Options{Addr: "ws://example.invalid", HTTPClient: client})
+	started := make(chan error, 1)
+	go func() { started <- s.Start(context.Background(), Callbacks{}) }()
+	recv(t, dialing, "dial to start")
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, started, "Start to return"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start returned %v", err)
+	}
+}
+
 func TestReconnectsAfterAbnormalClose(t *testing.T) {
 	srv := newWSServer(t, func(conn *websocket.Conn, n int32) {
 		ctx := context.Background()
@@ -297,6 +334,53 @@ func TestDataGoesStaleWithoutMessages(t *testing.T) {
 	waitStatus(t, s, func(st Status) bool { return st.Data == DataStale })
 }
 
+func TestCallbacksDoNotOverlap(t *testing.T) {
+	sendSecond := make(chan struct{})
+	secondSent := make(chan struct{})
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		ctx := context.Background()
+		conn.Read(ctx)
+		conn.Write(ctx, websocket.MessageBinary, inputStateAt(t, 1))
+		<-sendSecond
+		conn.Write(ctx, websocket.MessageBinary, inputStateAt(t, 2))
+		close(secondSent)
+		conn.Read(ctx)
+	})
+	s, _ := NewLocal(Options{Addr: srv.URL, DataTimeout: 20 * time.Millisecond})
+	staleStarted := make(chan struct{})
+	releaseStale := make(chan struct{})
+	data := make(chan uint64, 2)
+	var staleReported atomic.Bool
+	ctx := context.Background()
+	if err := s.Start(ctx, Callbacks{
+		Status: func(st Status) {
+			if st.Data == DataStale && staleReported.CompareAndSwap(false, true) {
+				close(staleStarted)
+				<-releaseStale
+			}
+		},
+		Data: func(st *State) { data <- st.Timestamp },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(ctx)
+	if timestamp := recv(t, data, "first state"); timestamp != 1 {
+		t.Fatalf("first timestamp %d", timestamp)
+	}
+	recv(t, staleStarted, "stale callback")
+	close(sendSecond)
+	recv(t, secondSent, "second message")
+	select {
+	case timestamp := <-data:
+		t.Fatalf("data callback overlapped stale callback for timestamp %d", timestamp)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseStale)
+	if timestamp := recv(t, data, "second state"); timestamp != 2 {
+		t.Fatalf("second timestamp %d", timestamp)
+	}
+}
+
 func TestFatalDeviceErrorEndsStream(t *testing.T) {
 	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
 		ctx := context.Background()
@@ -337,24 +421,23 @@ func TestStopFromCallbackDoesNotDeadlock(t *testing.T) {
 	if err := recv(t, stopped, "Stop to return inside the callback"); err != nil {
 		t.Fatal(err)
 	}
-	recv(t, s.done, "run goroutine to exit")
 	if st := s.Status(); st.Main != Stopped || st.Connection != Disconnected {
 		t.Fatalf("status %+v", st)
 	}
 }
 
 func TestRestartFromCallbackDoesNotDisturbNewSession(t *testing.T) {
-	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+	srv := newWSServer(t, func(conn *websocket.Conn, n int32) {
 		ctx := context.Background()
 		conn.Read(ctx)
-		conn.Write(ctx, websocket.MessageBinary, inputState(t))
+		conn.Write(ctx, websocket.MessageBinary, inputStateAt(t, uint64(n)))
 		conn.Read(ctx)
 	})
 	s, _ := NewLocal(Options{Addr: srv.URL})
 	ctx := context.Background()
 	restarted := make(chan error, 1)
 	second := make(chan *State, 1)
-	err := s.Start(ctx, Callbacks{Data: func(*State) {
+	err := s.Start(ctx, Callbacks{RawData: func([]byte) {
 		if err := s.Stop(ctx); err != nil {
 			restarted <- err
 			return
@@ -364,15 +447,18 @@ func TestRestartFromCallbackDoesNotDisturbNewSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstDone := s.done
 	if err := recv(t, restarted, "restart inside the callback"); err != nil {
 		t.Fatal(err)
 	}
 	defer s.Stop(ctx)
-	recv(t, second, "data from the second connection")
-	recv(t, firstDone, "first run goroutine to exit")
+	if st := recv(t, second, "data from the second connection"); st.Timestamp != 2 {
+		t.Fatalf("received timestamp %d from the stopped session", st.Timestamp)
+	}
 	s.mu.Lock()
-	conn := s.conn
+	var conn *websocket.Conn
+	if s.current != nil {
+		conn = s.current.conn
+	}
 	s.mu.Unlock()
 	if conn == nil {
 		t.Fatal("the first run goroutine cleared the second connection")

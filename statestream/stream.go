@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -65,9 +64,9 @@ type Options struct {
 	HTTPClient *http.Client
 }
 
-// Callbacks receive stream events. Every field is optional. Callbacks run on
-// the stream's goroutine, so they must not block for long. A callback may call
-// Stop; see Stop for what that means.
+// Callbacks receive stream events. Every field is optional. The stream calls
+// one callback at a time, so callbacks must not block for long. A callback may
+// call Stop and Start.
 type Callbacks struct {
 	Data    func(*State)
 	RawData func([]byte)
@@ -95,17 +94,34 @@ type Stream struct {
 	url    string
 	opts   Options
 
-	mu        sync.Mutex
-	status    Status
-	cb        Callbacks
-	token     string
-	conn      *websocket.Conn
-	cancel    context.CancelFunc
-	done      chan struct{}
-	dataTimer *time.Timer
-	subs      map[string]struct{}
-	// inCallback counts callbacks that are executing right now.
-	inCallback atomic.Int32
+	mu         sync.Mutex
+	status     Status
+	token      string
+	subs       map[string]struct{}
+	current    *streamRun
+	generation uint64
+
+	callbackMu      sync.Mutex
+	callbackQueue   []callbackEvent
+	callbackWorker  bool
+	callbackRunning *streamRun
+}
+
+// streamRun owns all state that belongs to one call to Start.
+type streamRun struct {
+	generation uint64
+	cancel     context.CancelFunc
+	done       chan struct{}
+	cb         Callbacks
+	conn       *websocket.Conn
+	dataTimer  *time.Timer
+}
+
+type callbackEvent struct {
+	run    *streamRun
+	final  bool
+	invoke func(Callbacks)
+	done   chan struct{}
 }
 
 // NewLocal creates a stream to a device on the local network.
@@ -197,35 +213,44 @@ func (s *Stream) Start(ctx context.Context, cb Callbacks) error {
 		s.mu.Unlock()
 		return newError(CodeStreamAlreadyStarted, "stream is already running; call Stop first")
 	}
-	s.cb = cb
+	if s.current != nil {
+		s.current.cancel()
+		if s.current.dataTimer != nil {
+			s.current.dataTimer.Stop()
+		}
+	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	s.cancel = cancel
-	done := make(chan struct{})
-	s.done = done
+	s.generation++
+	run := &streamRun{
+		generation: s.generation,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		cb:         cb,
+	}
+	s.current = run
+	s.status.Main, s.status.MainError = Starting, nil
+	s.queueStatusLocked(run, s.status)
 	s.mu.Unlock()
 
-	s.patch(func(st *Status) { st.Main = Starting; st.MainError = nil })
-
 	ready := make(chan error, 1)
-	go s.run(runCtx, ready, done)
+	go s.run(runCtx, run, ready)
 
 	timer := time.NewTimer(s.opts.ConnectTimeout)
 	defer timer.Stop()
 	select {
 	case err := <-ready:
 		if err != nil {
-			_ = s.shutdown(ctx)
+			_ = s.shutdown(ctx, run)
 		}
 		return err
 	case <-timer.C:
 		err := newError(CodeConnectionTimeout, fmt.Sprintf("connection timed out after %s", s.opts.ConnectTimeout))
-		s.mapErrorToStatus(err)
-		s.emitError(err)
-		_ = s.shutdown(ctx)
+		s.mapErrorToStatus(run, err)
+		s.emitError(run, err)
+		_ = s.shutdown(ctx, run)
 		return err
 	case <-ctx.Done():
-		_ = s.shutdown(context.Background())
-		s.patch(func(st *Status) { st.Main = Stopped })
+		_ = s.stopRun(context.Background(), run)
 		return ctx.Err()
 	}
 }
@@ -233,56 +258,58 @@ func (s *Stream) Start(ctx context.Context, cb Callbacks) error {
 // Stop closes the connection gracefully and clears the callbacks. It returns
 // an Error with CodeConnectionLost when the WebSocket did not close cleanly.
 //
-// Stop waits for the stream goroutine to exit, unless a callback is executing
-// when Stop is called. Then it returns as soon as the connection is closed,
-// because the goroutine that must exit may be the one running the callback.
-// The executing callback finishes; no later callback fires.
+// Stop waits for the stream goroutine to exit. A callback that is already
+// executing can finish. No later callback from that run fires.
 func (s *Stream) Stop(ctx context.Context) error {
 	s.mu.Lock()
-	if s.status.Main == Idle || s.status.Main == Stopped {
+	run := s.current
+	if run == nil {
 		s.mu.Unlock()
 		return nil
 	}
-	if s.dataTimer != nil {
-		s.dataTimer.Stop()
+	s.mu.Unlock()
+	return s.stopRun(ctx, run)
+}
+
+func (s *Stream) stopRun(ctx context.Context, run *streamRun) error {
+	s.mu.Lock()
+	stopped := false
+	if s.current == run {
+		stopped = true
+		run.cancel()
+		if run.dataTimer != nil {
+			run.dataTimer.Stop()
+		}
+		s.current = nil
+		s.status.Main, s.status.Connection, s.status.Auth, s.status.Data = Stopped, Disconnected, Unauthenticated, DataNone
+		s.status.ConnectionAttempts, s.status.AuthAttempts = 0, 0
 	}
 	s.mu.Unlock()
-	s.patch(func(st *Status) {
-		st.Main, st.Connection, st.Auth, st.Data = Stopped, Disconnected, Unauthenticated, DataNone
-		st.ConnectionAttempts, st.AuthAttempts = 0, 0
-	})
-	err := s.shutdown(ctx)
-	s.mu.Lock()
-	s.cb = Callbacks{}
-	s.mu.Unlock()
+	s.cancelCallbacks(run)
+	err := s.shutdown(ctx, run)
+	if stopped {
+		s.deliverStopped(run)
+	}
 	return err
 }
 
-// shutdown cancels the run goroutine, closes the socket and waits for the
-// goroutine. Cancelling first tells run that the close is intended. The close
-// is what wakes the read. shutdown does not wait while a callback is
-// executing: the run goroutine may be the caller, and it exits on its own
-// once the callback returns.
-func (s *Stream) shutdown(ctx context.Context) error {
+// shutdown cancels one run, closes its socket, and waits for it to exit.
+func (s *Stream) shutdown(ctx context.Context, run *streamRun) error {
+	run.cancel()
 	s.mu.Lock()
-	if s.cancel != nil {
-		s.cancel()
-	}
-	conn, done := s.conn, s.done
-	if s.dataTimer != nil {
-		s.dataTimer.Stop()
+	conn := run.conn
+	if run.dataTimer != nil {
+		run.dataTimer.Stop()
 	}
 	s.mu.Unlock()
 	var closeErr error
 	if conn != nil {
 		closeErr = conn.Close(websocket.StatusNormalClosure, "")
 	}
-	if done != nil && s.inCallback.Load() == 0 {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	select {
+	case <-run.done:
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 		return newError(CodeConnectionLost, "websocket did not close cleanly: "+closeErr.Error())
@@ -295,12 +322,16 @@ func (s *Stream) SetToken(ctx context.Context, token string) error {
 	s.mu.Lock()
 	changed := s.token != token
 	s.token = token
-	conn := s.conn
+	run := s.current
+	var conn *websocket.Conn
+	if run != nil {
+		conn = run.conn
+	}
 	s.mu.Unlock()
 	if !s.remote || conn == nil || !changed {
 		return nil
 	}
-	s.patch(func(st *Status) { st.Auth = Authenticating })
+	s.patch(run, func(st *Status) { st.Auth = Authenticating })
 	return writeJSON(ctx, conn, map[string]string{"token": token})
 }
 
@@ -310,7 +341,10 @@ func (s *Stream) Subscribe(ctx context.Context, guid string) error {
 	s.mu.Lock()
 	_, had := s.subs[guid]
 	s.subs[guid] = struct{}{}
-	conn := s.conn
+	var conn *websocket.Conn
+	if s.current != nil {
+		conn = s.current.conn
+	}
 	s.mu.Unlock()
 	if had || conn == nil || !s.remote {
 		return nil
@@ -323,7 +357,10 @@ func (s *Stream) Unsubscribe(ctx context.Context, guid string) error {
 	s.mu.Lock()
 	_, had := s.subs[guid]
 	delete(s.subs, guid)
-	conn := s.conn
+	var conn *websocket.Conn
+	if s.current != nil {
+		conn = s.current.conn
+	}
 	s.mu.Unlock()
 	if !had || conn == nil || !s.remote {
 		return nil
@@ -331,35 +368,40 @@ func (s *Stream) Unsubscribe(ctx context.Context, guid string) error {
 	return writeJSON(ctx, conn, map[string][]string{"unsubscribe": {guid}})
 }
 
-func (s *Stream) run(ctx context.Context, ready chan<- error, done chan struct{}) {
-	defer close(done)
+func (s *Stream) run(ctx context.Context, run *streamRun, ready chan<- error) {
 	var once sync.Once
 	signal := func(err error) { once.Do(func() { ready <- err }) }
+	defer func() {
+		if ctx.Err() != nil {
+			signal(ctx.Err())
+		}
+		close(run.done)
+	}()
 
 	connectedOnce := false
 	retries, authRetries := 0, 0
 	for {
-		s.patch(func(st *Status) { st.Connection = Connecting })
+		s.patch(run, func(st *Status) { st.Connection = Connecting })
 		conn, dialErr := s.dial(ctx)
 		closeCode := websocket.StatusCode(-1)
 		var readErr error
 		if dialErr == nil {
-			if !s.adopt(ctx, conn) {
+			if !s.adopt(ctx, run, conn) {
 				_ = conn.Close(websocket.StatusNormalClosure, "")
 				return
 			}
 			connectedOnce = true
 			retries, authRetries = 0, 0
-			s.onOpen(ctx, conn, signal)
-			closeCode, readErr = s.readLoop(conn, signal)
-			s.clearConn(conn)
+			s.onOpen(ctx, run, conn, signal)
+			closeCode, readErr = s.readLoop(run, conn, signal)
+			s.clearConn(run, conn)
 		} else {
 			if ctx.Err() != nil {
 				return
 			}
 			e := newError(CodeConnectionFailed, "websocket connection error: "+dialErr.Error())
-			s.mapErrorToStatus(e)
-			s.emitError(e)
+			s.mapErrorToStatus(run, e)
+			s.emitError(run, e)
 			if !connectedOnce {
 				signal(e)
 				return
@@ -374,49 +416,49 @@ func (s *Stream) run(ctx context.Context, ready chan<- error, done chan struct{}
 			authRetries++
 			if authRetries > s.opts.MaxAuthAttempts {
 				e := newError(CodeAuthFailed, fmt.Sprintf("maximum authentication attempts (%d) reached", s.opts.MaxAuthAttempts))
-				s.mapErrorToStatus(e)
-				s.emitError(e)
+				s.mapErrorToStatus(run, e)
+				s.emitError(run, e)
 				signal(e)
 				return
 			}
-			s.patch(func(st *Status) { st.Auth = Reauthenticating; st.AuthAttempts = authRetries })
+			s.patch(run, func(st *Status) { st.Auth = Reauthenticating; st.AuthAttempts = authRetries })
 			if s.opts.TokenProvider == nil {
 				e := newError(CodeAuthFailed, "token rejected and no TokenProvider configured")
-				s.mapErrorToStatus(e)
-				s.emitError(e)
+				s.mapErrorToStatus(run, e)
+				s.emitError(run, e)
 				signal(e)
 				return
 			}
-			var token string
-			var err error
-			s.call(func() { token, err = s.opts.TokenProvider(ctx) })
+			token, err := s.opts.TokenProvider(ctx)
 			if err != nil {
 				e := newError(CodeAuthRefreshFailed, "failed to refresh token: "+err.Error())
-				s.mapErrorToStatus(e)
-				s.emitError(e)
+				s.mapErrorToStatus(run, e)
+				s.emitError(run, e)
 				signal(e)
 				return
 			}
 			s.mu.Lock()
-			s.token = token
+			if s.current == run {
+				s.token = token
+			}
 			s.mu.Unlock()
 		case closeCode == websocket.StatusNormalClosure:
-			s.patch(func(st *Status) { st.Connection = Disconnected })
+			s.patch(run, func(st *Status) { st.Connection = Disconnected })
 			e := newError(CodeConnectionLost, "stream closed by the server")
-			s.mapErrorToStatus(e)
-			s.emitError(e)
+			s.mapErrorToStatus(run, e)
+			s.emitError(run, e)
 			signal(e)
 			return
 		default:
 			retries++
 			if retries > s.opts.MaxReconnectAttempts {
 				e := newError(CodeReconnectFailed, fmt.Sprintf("maximum reconnection attempts (%d) reached", s.opts.MaxReconnectAttempts))
-				s.mapErrorToStatus(e)
-				s.emitError(e)
+				s.mapErrorToStatus(run, e)
+				s.emitError(run, e)
 				signal(e)
 				return
 			}
-			s.patch(func(st *Status) { st.Connection = Reconnecting; st.ConnectionAttempts = retries })
+			s.patch(run, func(st *Status) { st.Connection = Reconnecting; st.ConnectionAttempts = retries })
 			select {
 			case <-time.After(s.opts.ReconnectDelay):
 			case <-ctx.Done():
@@ -437,11 +479,11 @@ func (s *Stream) dial(ctx context.Context) (*websocket.Conn, error) {
 	return conn, nil
 }
 
-func (s *Stream) onOpen(ctx context.Context, conn *websocket.Conn, signal func(error)) {
-	s.patch(func(st *Status) { st.Connection = Connected; st.ConnectionAttempts = 0 })
+func (s *Stream) onOpen(ctx context.Context, run *streamRun, conn *websocket.Conn, signal func(error)) {
+	s.patch(run, func(st *Status) { st.Connection = Connected; st.ConnectionAttempts = 0 })
 	if !s.remote {
 		_ = writeJSON(ctx, conn, map[string]bool{"enable": true})
-		s.patch(func(st *Status) { st.Auth = Authenticated; st.Main = Running })
+		s.patch(run, func(st *Status) { st.Auth = Authenticated; st.Main = Running })
 		signal(nil)
 		return
 	}
@@ -453,7 +495,7 @@ func (s *Stream) onOpen(ctx context.Context, conn *websocket.Conn, signal func(e
 	}
 	s.mu.Unlock()
 	if token != "" {
-		s.patch(func(st *Status) { st.Auth = Authenticating })
+		s.patch(run, func(st *Status) { st.Auth = Authenticating })
 		_ = writeJSON(ctx, conn, map[string]string{"token": token})
 	}
 	if len(subs) > 0 {
@@ -466,18 +508,20 @@ func (s *Stream) onOpen(ctx context.Context, conn *websocket.Conn, signal func(e
 // has no cancellable context on purpose: cancelling one force-closes the
 // socket without a close handshake. shutdown closes the socket instead, and
 // that wakes the read.
-func (s *Stream) readLoop(conn *websocket.Conn, signal func(error)) (websocket.StatusCode, error) {
+func (s *Stream) readLoop(run *streamRun, conn *websocket.Conn, signal func(error)) (websocket.StatusCode, error) {
 	authReported := false
 	for {
 		typ, data, err := conn.Read(context.Background())
 		if err != nil {
 			return websocket.CloseStatus(err), err
 		}
-		s.touchData()
-		if cb := s.callbacks(); cb.RawData != nil {
-			s.call(func() { cb.RawData(data) })
-		}
-		if s.handleMessage(typ, data, &authReported, signal) {
+		s.touchData(run)
+		s.emit(run, func(cb Callbacks) {
+			if cb.RawData != nil {
+				cb.RawData(data)
+			}
+		})
+		if s.handleMessage(run, typ, data, &authReported, signal) {
 			_ = conn.Close(websocket.StatusInternalError, "fatal device error")
 			return -1, errFatalDeviceError
 		}
@@ -485,7 +529,7 @@ func (s *Stream) readLoop(conn *websocket.Conn, signal func(error)) (websocket.S
 }
 
 // handleMessage decodes one message and reports true for a fatal device error.
-func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authReported *bool, signal func(error)) bool {
+func (s *Stream) handleMessage(run *streamRun, typ websocket.MessageType, data []byte, authReported *bool, signal func(error)) bool {
 	payload, barID := data, ""
 	if typ == websocket.MessageText {
 		var env struct {
@@ -496,13 +540,15 @@ func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authRepor
 			Device  RemoteDevice    `json:"device"`
 		}
 		if err := json.Unmarshal(data, &env); err != nil {
-			s.emitError(&Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+			s.emitError(run, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
 			return false
 		}
 		if strings.HasPrefix(env.Type, "device.") {
-			if cb := s.callbacks(); cb.DeviceEvent != nil {
-				s.call(func() { cb.DeviceEvent(DeviceEvent{Type: env.Type, Device: env.Device}) })
-			}
+			s.emit(run, func(cb Callbacks) {
+				if cb.DeviceEvent != nil {
+					cb.DeviceEvent(DeviceEvent{Type: env.Type, Device: env.Device})
+				}
+			})
 			return false
 		}
 		barID = env.BarID
@@ -511,12 +557,12 @@ func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authRepor
 		}
 		var err error
 		if payload, err = decodeEnvelopeState(env.State); err != nil {
-			s.emitError(&Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+			s.emitError(run, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
 			return false
 		}
 		if s.remote && !*authReported {
 			*authReported = true
-			s.patch(func(st *Status) { st.Auth = Authenticated; st.Main = Running })
+			s.patch(run, func(st *Status) { st.Auth = Authenticated; st.Main = Running })
 			signal(nil)
 		}
 	}
@@ -525,7 +571,7 @@ func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authRepor
 	}
 	var raw pb.State
 	if err := proto.Unmarshal(payload, &raw); err != nil {
-		s.emitError(&Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+		s.emitError(run, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
 		return false
 	}
 	if raw.Error != nil {
@@ -534,12 +580,12 @@ func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authRepor
 			Message: fmt.Sprintf("device reported %s: %s", raw.Error.GetSeverity(), raw.Error.GetCause()),
 			Data:    raw.Error,
 		}
-		s.mapErrorToStatus(e)
+		s.mapErrorToStatus(run, e)
 		fatal := raw.Error.GetSeverity() == pb.Severity_FATAL
 		if fatal {
-			s.patch(func(st *Status) { st.Main = Failed })
+			s.patch(run, func(st *Status) { st.Main = Failed })
 		}
-		s.emitError(e)
+		s.emitError(run, e)
 		switch {
 		case fatal:
 			signal(e)
@@ -549,11 +595,13 @@ func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authRepor
 		}
 	}
 	state := processState(&raw, barID, func(err error) {
-		s.emitError(&Error{Code: CodeFrameProcessError, Message: err.Error()})
+		s.emitError(run, &Error{Code: CodeFrameProcessError, Message: err.Error()})
 	})
-	if cb := s.callbacks(); cb.Data != nil {
-		s.call(func() { cb.Data(state) })
-	}
+	s.emit(run, func(cb Callbacks) {
+		if cb.Data != nil {
+			cb.Data(state)
+		}
+	})
 	return false
 }
 
@@ -591,57 +639,150 @@ func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {
 // adopt stores a freshly dialed connection. It reports false when shutdown
 // already ran, in which case the caller owns closing conn. The check and the
 // store happen under one lock, so exactly one side closes the socket.
-func (s *Stream) adopt(ctx context.Context, conn *websocket.Conn) bool {
+func (s *Stream) adopt(ctx context.Context, run *streamRun, conn *websocket.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || s.current != run {
 		return false
 	}
-	s.conn = conn
+	run.conn = conn
 	return true
 }
 
-// clearConn forgets conn unless a newer connection has replaced it.
-func (s *Stream) clearConn(conn *websocket.Conn) {
+func (s *Stream) clearConn(run *streamRun, conn *websocket.Conn) {
 	s.mu.Lock()
-	if s.conn == conn {
-		s.conn = nil
+	if run.conn == conn {
+		run.conn = nil
 	}
 	s.mu.Unlock()
 }
 
-// call runs user code and counts it while it executes. See shutdown.
-func (s *Stream) call(fn func()) {
-	s.inCallback.Add(1)
-	defer s.inCallback.Add(-1)
-	fn()
+// emit adds one callback to the stream's serialized callback queue.
+func (s *Stream) emit(run *streamRun, invoke func(Callbacks)) {
+	s.mu.Lock()
+	if s.current == run {
+		s.queueCallbackLocked(callbackEvent{run: run, invoke: invoke})
+	}
+	s.mu.Unlock()
 }
 
-func (s *Stream) callbacks() Callbacks {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cb
+func (s *Stream) queueStatusLocked(run *streamRun, status Status) {
+	if run.cb.Status == nil {
+		return
+	}
+	s.queueCallbackLocked(callbackEvent{
+		run:    run,
+		invoke: func(cb Callbacks) { cb.Status(status) },
+	})
 }
 
-// patch mutates the status under the lock and reports the new snapshot.
-func (s *Stream) patch(fn func(*Status)) {
+func (s *Stream) queueCallbackLocked(event callbackEvent) {
+	s.callbackMu.Lock()
+	s.callbackQueue = append(s.callbackQueue, event)
+	if !s.callbackWorker {
+		s.callbackWorker = true
+		go s.runCallbacks()
+	}
+	s.callbackMu.Unlock()
+}
+
+func (s *Stream) runCallbacks() {
+	for {
+		s.callbackMu.Lock()
+		if len(s.callbackQueue) == 0 {
+			s.callbackWorker = false
+			s.callbackMu.Unlock()
+			return
+		}
+		event := s.callbackQueue[0]
+		s.callbackQueue = s.callbackQueue[1:]
+		s.callbackRunning = event.run
+		s.callbackMu.Unlock()
+
+		s.mu.Lock()
+		active := s.current == event.run
+		if event.final {
+			active = s.current == nil && s.generation == event.run.generation && s.status.Main == Stopped
+		}
+		s.mu.Unlock()
+		if active {
+			event.invoke(event.run.cb)
+		}
+		if event.done != nil {
+			close(event.done)
+		}
+
+		s.callbackMu.Lock()
+		s.callbackRunning = nil
+		s.callbackMu.Unlock()
+	}
+}
+
+func (s *Stream) cancelCallbacks(run *streamRun) {
+	s.callbackMu.Lock()
+	kept := s.callbackQueue[:0]
+	for _, event := range s.callbackQueue {
+		if event.run != run {
+			kept = append(kept, event)
+		}
+	}
+	s.callbackQueue = kept
+	s.callbackMu.Unlock()
+}
+
+// deliverStopped reports the final status unless a callback from this run is
+// executing or a newer run has started.
+func (s *Stream) deliverStopped(run *streamRun) {
 	s.mu.Lock()
+	if s.current != nil || s.generation != run.generation || run.cb.Status == nil {
+		s.mu.Unlock()
+		return
+	}
+	s.callbackMu.Lock()
+	if s.callbackRunning == run {
+		s.callbackMu.Unlock()
+		s.mu.Unlock()
+		return
+	}
+	status := s.status
+	done := make(chan struct{})
+	s.callbackQueue = append(s.callbackQueue, callbackEvent{
+		run:    run,
+		final:  true,
+		invoke: func(cb Callbacks) { cb.Status(status) },
+		done:   done,
+	})
+	if !s.callbackWorker {
+		s.callbackWorker = true
+		go s.runCallbacks()
+	}
+	s.callbackMu.Unlock()
+	s.mu.Unlock()
+	<-done
+}
+
+// patch changes the status only when run is still current.
+func (s *Stream) patch(run *streamRun, fn func(*Status)) {
+	s.mu.Lock()
+	if s.current != run {
+		s.mu.Unlock()
+		return
+	}
 	fn(&s.status)
-	snap, cb := s.status, s.cb
+	s.queueStatusLocked(run, s.status)
 	s.mu.Unlock()
-	if cb.Status != nil {
-		s.call(func() { cb.Status(snap) })
-	}
 }
 
-func (s *Stream) emitError(e *Error) {
-	if cb := s.callbacks(); cb.Error != nil {
-		s.call(func() { cb.Error(e) })
-	}
+func (s *Stream) emitError(run *streamRun, e *Error) {
+	s.emit(run, func(cb Callbacks) {
+		if cb.Error != nil {
+			cb.Error(e)
+		}
+	})
 }
 
-func (s *Stream) mapErrorToStatus(e *Error) {
-	s.patch(func(st *Status) {
+func (s *Stream) mapErrorToStatus(run *streamRun, e *Error) {
+	s.patch(run, func(st *Status) {
 		switch e.Code {
 		case CodeConnectionFailed, CodeConnectionLost, CodeReconnectFailed, CodeConnectionTimeout:
 			st.Connection, st.ConnectionError = Disconnected, e
@@ -657,23 +798,29 @@ func (s *Stream) mapErrorToStatus(e *Error) {
 
 // touchData marks data as active and arms the stale timer. The status
 // callback fires only when the state changes, not on every message.
-func (s *Stream) touchData() {
+func (s *Stream) touchData(run *streamRun) {
 	s.mu.Lock()
+	if s.current != run {
+		s.mu.Unlock()
+		return
+	}
 	changed := s.status.Data != DataActive
 	s.status.Data, s.status.LastActivity = DataActive, time.Now()
-	if s.dataTimer != nil {
-		s.dataTimer.Stop()
+	if run.dataTimer != nil {
+		run.dataTimer.Stop()
 	}
-	s.dataTimer = time.AfterFunc(s.opts.DataTimeout, func() {
-		s.patch(func(st *Status) {
-			if st.Data == DataActive {
-				st.Data = DataStale
-			}
-		})
+	var timer *time.Timer
+	timer = time.AfterFunc(s.opts.DataTimeout, func() {
+		s.mu.Lock()
+		if s.current == run && run.dataTimer == timer && s.status.Data == DataActive {
+			s.status.Data = DataStale
+			s.queueStatusLocked(run, s.status)
+		}
+		s.mu.Unlock()
 	})
-	snap, cb := s.status, s.cb
-	s.mu.Unlock()
-	if changed && cb.Status != nil {
-		s.call(func() { cb.Status(snap) })
+	run.dataTimer = timer
+	if changed {
+		s.queueStatusLocked(run, s.status)
 	}
+	s.mu.Unlock()
 }
