@@ -258,6 +258,28 @@ func TestGivesUpAfterMaxReconnectAttempts(t *testing.T) {
 	}
 }
 
+func TestNegativeMaxReconnectAttemptsFailsOnFirstDrop(t *testing.T) {
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		conn.Read(context.Background())
+		conn.Close(websocket.StatusInternalError, "boom")
+	})
+	s, _ := NewLocal(Options{Addr: srv.URL, ReconnectDelay: 10 * time.Millisecond, MaxReconnectAttempts: -1})
+	if s.opts.MaxReconnectAttempts != 0 {
+		t.Fatalf("MaxReconnectAttempts %d, want a negative value normalized to 0", s.opts.MaxReconnectAttempts)
+	}
+	errs := make(chan *Error, 8)
+	if err := s.Start(context.Background(), Callbacks{Error: func(e *Error) { errs <- e }}); err != nil {
+		t.Fatal(err)
+	}
+	if e := recv(t, errs, "reconnect failed"); e.Code != CodeReconnectFailed {
+		t.Fatalf("first error %v, want %v", e.Code, CodeReconnectFailed)
+	}
+	waitStatus(t, s, func(st Status) bool { return st.Main == Failed && st.Connection == Disconnected })
+	if srv.accepts.Load() != 1 {
+		t.Fatalf("accepts %d, want 1: the stream must not redial", srv.accepts.Load())
+	}
+}
+
 func TestDataGoesStaleWithoutMessages(t *testing.T) {
 	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
 		ctx := context.Background()

@@ -54,8 +54,11 @@ type Options struct {
 
 	ConnectTimeout       time.Duration
 	DataTimeout          time.Duration
+	ReconnectDelay time.Duration
+	// MaxReconnectAttempts and MaxAuthAttempts count retries after the first
+	// failure. Zero selects the default; a negative value disables retries, so
+	// the stream fails on the first drop or the first rejected token.
 	MaxReconnectAttempts int
-	ReconnectDelay       time.Duration
 	MaxAuthAttempts      int
 	// HTTPClient is used for the WebSocket handshake. nil means http.DefaultClient.
 	HTTPClient *http.Client
@@ -140,6 +143,8 @@ func newStream(remote bool, wsURL string, opts Options) *Stream {
 	setDefault(&opts.ReconnectDelay, DefaultReconnectDelay)
 	setDefault(&opts.MaxReconnectAttempts, DefaultMaxReconnectAttempts)
 	setDefault(&opts.MaxAuthAttempts, DefaultMaxAuthAttempts)
+	opts.MaxReconnectAttempts = max(opts.MaxReconnectAttempts, 0)
+	opts.MaxAuthAttempts = max(opts.MaxAuthAttempts, 0)
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = http.DefaultClient
 	}
