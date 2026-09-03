@@ -1,0 +1,7 @@
+version: "2"
+linters:
+  exclusions:
+    rules:
+      # Test fakes and cleanups ignore errors on purpose.
+      - path: _test\.go
+        linters: [errcheck]
