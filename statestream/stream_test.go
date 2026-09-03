@@ -92,6 +92,21 @@ func waitStatus(t *testing.T, s *Stream, ok func(Status) bool) Status {
 	panic("unreachable")
 }
 
+func runAsync(s *Stream, cb Callbacks) (context.CancelFunc, <-chan error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, cb) }()
+	return cancel, done
+}
+
+func cancelAndWait(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	cancel()
+	if err := recv(t, done, "Run to stop"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v", err)
+	}
+}
+
 func TestLocalStreamDeliversDecodedUpdatesAndStopsCleanly(t *testing.T) {
 	handshake := make(chan string, 1)
 	closed := make(chan websocket.StatusCode, 1)
@@ -116,15 +131,11 @@ func TestLocalStreamDeliversDecodedUpdatesAndStopsCleanly(t *testing.T) {
 
 	data := make(chan *State, 4)
 	raw := make(chan []byte, 4)
-	ctx := context.Background()
-	err = s.Start(ctx, Callbacks{
+	cancel, done := runAsync(s, Callbacks{
 		Data:    func(st *State) { data <- st },
 		RawData: func(b []byte) { raw <- b },
 		Error:   func(e *Error) { t.Errorf("unexpected error %v", e) },
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if got := recv(t, handshake, "handshake"); got != `{"enable":true}` {
 		t.Fatalf("handshake %q", got)
 	}
@@ -145,38 +156,31 @@ func TestLocalStreamDeliversDecodedUpdatesAndStopsCleanly(t *testing.T) {
 		t.Fatalf("status %+v", got)
 	}
 
-	if err := s.Stop(ctx); err != nil {
-		t.Fatal(err)
-	}
+	cancelAndWait(t, cancel, done)
 	if code := recv(t, closed, "server close"); code != websocket.StatusNormalClosure {
 		t.Fatalf("server saw close code %d", code)
 	}
 	if got := s.Status(); got.Main != Stopped || got.Connection != Disconnected || got.Data != DataNone {
 		t.Fatalf("status after stop %+v", got)
 	}
-	if err := s.Stop(ctx); err != nil {
-		t.Fatalf("second stop: %v", err)
-	}
 }
 
-func TestStartRejectsWhileRunning(t *testing.T) {
+func TestRunRejectsWhileRunning(t *testing.T) {
 	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) { conn.Read(context.Background()); conn.Read(context.Background()) })
 	s, _ := NewLocal(Options{Addr: srv.URL})
-	ctx := context.Background()
-	if err := s.Start(ctx, Callbacks{}); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop(ctx)
+	cancel, done := runAsync(s, Callbacks{})
+	waitStatus(t, s, func(st Status) bool { return st.Main == Running })
+	defer cancelAndWait(t, cancel, done)
 	var e *Error
-	if err := s.Start(ctx, Callbacks{}); !errors.As(err, &e) || e.Code != CodeStreamAlreadyStarted {
+	if err := s.Run(context.Background(), Callbacks{}); !errors.As(err, &e) || e.Code != CodeStreamAlreadyStarted {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestStartFailsWhenUnreachable(t *testing.T) {
+func TestRunFailsWhenUnreachable(t *testing.T) {
 	s, _ := NewLocal(Options{Addr: "127.0.0.1:1", ConnectTimeout: time.Second})
 	errs := make(chan *Error, 1)
-	err := s.Start(context.Background(), Callbacks{Error: func(e *Error) { errs <- e }})
+	err := s.Run(context.Background(), Callbacks{Error: func(e *Error) { errs <- e }})
 	var e *Error
 	if !errors.As(err, &e) || e.Code != CodeConnectionFailed {
 		t.Fatalf("got %v", err)
@@ -189,10 +193,10 @@ func TestStartFailsWhenUnreachable(t *testing.T) {
 	}
 }
 
-func TestStartTimesOutWhenRemoteNeverAuthenticates(t *testing.T) {
+func TestRunTimesOutWhenRemoteNeverAuthenticates(t *testing.T) {
 	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) { conn.Read(context.Background()); conn.Read(context.Background()) })
 	s, _ := NewRemote(Options{Addr: srv.URL, Token: "t", ConnectTimeout: 100 * time.Millisecond})
-	err := s.Start(context.Background(), Callbacks{})
+	err := s.Run(context.Background(), Callbacks{})
 	var e *Error
 	if !errors.As(err, &e) || e.Code != CodeConnectionTimeout {
 		t.Fatalf("got %v", err)
@@ -202,7 +206,7 @@ func TestStartTimesOutWhenRemoteNeverAuthenticates(t *testing.T) {
 	}
 }
 
-func TestStopCancelsStart(t *testing.T) {
+func TestCancelStopsDial(t *testing.T) {
 	dialing := make(chan struct{})
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		close(dialing)
@@ -210,14 +214,13 @@ func TestStopCancelsStart(t *testing.T) {
 		return nil, r.Context().Err()
 	})}
 	s, _ := NewLocal(Options{Addr: "ws://example.invalid", HTTPClient: client})
-	started := make(chan error, 1)
-	go func() { started <- s.Start(context.Background(), Callbacks{}) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, Callbacks{}) }()
 	recv(t, dialing, "dial to start")
-	if err := s.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := recv(t, started, "Start to return"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Start returned %v", err)
+	cancel()
+	if err := recv(t, done, "Run to return"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v", err)
 	}
 }
 
@@ -235,11 +238,8 @@ func TestReconnectsAfterAbnormalClose(t *testing.T) {
 	s, _ := NewLocal(Options{Addr: srv.URL, ReconnectDelay: 10 * time.Millisecond})
 	data := make(chan *State, 1)
 	statuses := make(chan Status, 64)
-	ctx := context.Background()
-	if err := s.Start(ctx, Callbacks{Data: func(st *State) { data <- st }, Status: func(st Status) { statuses <- st }}); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop(ctx)
+	cancel, done := runAsync(s, Callbacks{Data: func(st *State) { data <- st }, Status: func(st Status) { statuses <- st }})
+	defer cancelAndWait(t, cancel, done)
 	recv(t, data, "data from second connection")
 	if srv.accepts.Load() != 2 {
 		t.Fatalf("accepts %d", srv.accepts.Load())
@@ -265,9 +265,7 @@ func TestGivesUpAfterMaxReconnectAttempts(t *testing.T) {
 	})
 	s, _ := NewLocal(Options{Addr: srv.URL, ReconnectDelay: 200 * time.Millisecond, MaxReconnectAttempts: 2})
 	errs := make(chan *Error, 8)
-	if err := s.Start(context.Background(), Callbacks{Error: func(e *Error) { errs <- e }}); err != nil {
-		t.Fatal(err)
-	}
+	_, done := runAsync(s, Callbacks{Error: func(e *Error) { errs <- e }})
 	// Once the client is waiting to reconnect, take the server away so every
 	// further dial fails and the attempt budget runs out.
 	waitStatus(t, s, func(st Status) bool { return st.Connection == Reconnecting && st.ConnectionAttempts == 1 })
@@ -289,6 +287,10 @@ func TestGivesUpAfterMaxReconnectAttempts(t *testing.T) {
 			t.Fatalf("errors %v want %v", codes, want)
 		}
 	}
+	var runErr *Error
+	if err := recv(t, done, "Run to fail"); !errors.As(err, &runErr) || runErr.Code != CodeReconnectFailed {
+		t.Fatalf("Run returned %v", err)
+	}
 	waitStatus(t, s, func(st Status) bool { return st.Main == Failed && st.Connection == Disconnected })
 	if srv.accepts.Load() != 1 {
 		t.Fatalf("accepts %d", srv.accepts.Load())
@@ -305,11 +307,13 @@ func TestNegativeMaxReconnectAttemptsFailsOnFirstDrop(t *testing.T) {
 		t.Fatalf("MaxReconnectAttempts %d, want a negative value normalized to 0", s.opts.MaxReconnectAttempts)
 	}
 	errs := make(chan *Error, 8)
-	if err := s.Start(context.Background(), Callbacks{Error: func(e *Error) { errs <- e }}); err != nil {
-		t.Fatal(err)
-	}
+	_, done := runAsync(s, Callbacks{Error: func(e *Error) { errs <- e }})
 	if e := recv(t, errs, "reconnect failed"); e.Code != CodeReconnectFailed {
 		t.Fatalf("first error %v, want %v", e.Code, CodeReconnectFailed)
+	}
+	var runErr *Error
+	if err := recv(t, done, "Run to fail"); !errors.As(err, &runErr) || runErr.Code != CodeReconnectFailed {
+		t.Fatalf("Run returned %v", err)
 	}
 	waitStatus(t, s, func(st Status) bool { return st.Main == Failed && st.Connection == Disconnected })
 	if srv.accepts.Load() != 1 {
@@ -325,11 +329,8 @@ func TestDataGoesStaleWithoutMessages(t *testing.T) {
 		conn.Read(ctx)
 	})
 	s, _ := NewLocal(Options{Addr: srv.URL, DataTimeout: 30 * time.Millisecond})
-	ctx := context.Background()
-	if err := s.Start(ctx, Callbacks{}); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop(ctx)
+	cancel, done := runAsync(s, Callbacks{})
+	defer cancelAndWait(t, cancel, done)
 	waitStatus(t, s, func(st Status) bool { return st.Data == DataActive })
 	waitStatus(t, s, func(st Status) bool { return st.Data == DataStale })
 }
@@ -351,8 +352,7 @@ func TestCallbacksDoNotOverlap(t *testing.T) {
 	releaseStale := make(chan struct{})
 	data := make(chan uint64, 2)
 	var staleReported atomic.Bool
-	ctx := context.Background()
-	if err := s.Start(ctx, Callbacks{
+	cancel, done := runAsync(s, Callbacks{
 		Status: func(st Status) {
 			if st.Data == DataStale && staleReported.CompareAndSwap(false, true) {
 				close(staleStarted)
@@ -360,10 +360,8 @@ func TestCallbacksDoNotOverlap(t *testing.T) {
 			}
 		},
 		Data: func(st *State) { data <- st.Timestamp },
-	}); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop(ctx)
+	})
+	defer cancelAndWait(t, cancel, done)
 	if timestamp := recv(t, data, "first state"); timestamp != 1 {
 		t.Fatalf("first timestamp %d", timestamp)
 	}
@@ -391,12 +389,14 @@ func TestFatalDeviceErrorEndsStream(t *testing.T) {
 	})
 	s, _ := NewLocal(Options{Addr: srv.URL})
 	errs := make(chan *Error, 1)
-	if err := s.Start(context.Background(), Callbacks{Error: func(e *Error) { errs <- e }}); err != nil {
-		t.Fatal(err)
-	}
+	_, done := runAsync(s, Callbacks{Error: func(e *Error) { errs <- e }})
 	e := recv(t, errs, "device error")
 	if e.Code != CodeDeviceError || e.Data.(*pb.Error).GetCause() != pb.Cause_RESOURCE_LIMIT {
 		t.Fatalf("%+v", e)
+	}
+	var runErr *Error
+	if err := recv(t, done, "Run to fail"); !errors.As(err, &runErr) || runErr.Code != CodeDeviceError {
+		t.Fatalf("Run returned %v", err)
 	}
 	waitStatus(t, s, func(st Status) bool { return st.Main == Failed })
 	if srv.accepts.Load() != 1 {
@@ -404,29 +404,33 @@ func TestFatalDeviceErrorEndsStream(t *testing.T) {
 	}
 }
 
-func TestStopFromCallbackDoesNotDeadlock(t *testing.T) {
+func TestCallbackCanCancelRun(t *testing.T) {
 	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
 		ctx := context.Background()
 		conn.Read(ctx)
-		b, _ := proto.Marshal(&pb.State{Error: &pb.Error{Cause: pb.Cause_RESOURCE_LIMIT, Severity: pb.Severity_FATAL}})
-		conn.Write(ctx, websocket.MessageBinary, b)
+		conn.Write(ctx, websocket.MessageBinary, inputState(t))
 		conn.Read(ctx)
 	})
 	s, _ := NewLocal(Options{Addr: srv.URL})
-	ctx := context.Background()
-	stopped := make(chan error, 1)
-	if err := s.Start(ctx, Callbacks{Error: func(*Error) { stopped <- s.Stop(ctx) }}); err != nil {
-		t.Fatal(err)
-	}
-	if err := recv(t, stopped, "Stop to return inside the callback"); err != nil {
-		t.Fatal(err)
+	ctx, cancel := context.WithCancel(context.Background())
+	callbackDone := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Run(ctx, Callbacks{Data: func(*State) {
+			cancel()
+			close(callbackDone)
+		}})
+	}()
+	recv(t, callbackDone, "callback to cancel Run")
+	if err := recv(t, done, "Run to stop"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v", err)
 	}
 	if st := s.Status(); st.Main != Stopped || st.Connection != Disconnected {
 		t.Fatalf("status %+v", st)
 	}
 }
 
-func TestRestartFromCallbackDoesNotDisturbNewSession(t *testing.T) {
+func TestStreamCanRunAgainAfterRunReturns(t *testing.T) {
 	srv := newWSServer(t, func(conn *websocket.Conn, n int32) {
 		ctx := context.Background()
 		conn.Read(ctx)
@@ -434,34 +438,20 @@ func TestRestartFromCallbackDoesNotDisturbNewSession(t *testing.T) {
 		conn.Read(ctx)
 	})
 	s, _ := NewLocal(Options{Addr: srv.URL})
-	ctx := context.Background()
-	restarted := make(chan error, 1)
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- s.Run(firstCtx, Callbacks{RawData: func([]byte) { cancelFirst() }})
+	}()
+	if err := recv(t, firstDone, "first Run to stop"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first Run returned %v", err)
+	}
+
 	second := make(chan *State, 1)
-	err := s.Start(ctx, Callbacks{RawData: func([]byte) {
-		if err := s.Stop(ctx); err != nil {
-			restarted <- err
-			return
-		}
-		restarted <- s.Start(ctx, Callbacks{Data: func(st *State) { second <- st }})
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := recv(t, restarted, "restart inside the callback"); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop(ctx)
+	cancelSecond, secondDone := runAsync(s, Callbacks{Data: func(st *State) { second <- st }})
+	defer cancelAndWait(t, cancelSecond, secondDone)
 	if st := recv(t, second, "data from the second connection"); st.Timestamp != 2 {
-		t.Fatalf("received timestamp %d from the stopped session", st.Timestamp)
-	}
-	s.mu.Lock()
-	var conn *websocket.Conn
-	if s.current != nil {
-		conn = s.current.conn
-	}
-	s.mu.Unlock()
-	if conn == nil {
-		t.Fatal("the first run goroutine cleared the second connection")
+		t.Fatalf("received timestamp %d, want 2", st.Timestamp)
 	}
 	if st := s.Status(); st.Main != Running || st.Connection != Connected {
 		t.Fatalf("status %+v", st)
@@ -491,17 +481,13 @@ func TestRemoteAuthSubscribeAndEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	if err := s.Subscribe(ctx, "g1"); err != nil {
+	if err := s.Subscribe(context.Background(), "g1"); err != nil {
 		t.Fatal(err)
 	}
 	data := make(chan *State, 1)
 	events := make(chan DeviceEvent, 1)
-	err = s.Start(ctx, Callbacks{Data: func(st *State) { data <- st }, DeviceEvent: func(e DeviceEvent) { events <- e }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop(ctx)
+	cancel, done := runAsync(s, Callbacks{Data: func(st *State) { data <- st }, DeviceEvent: func(e DeviceEvent) { events <- e }})
+	defer cancelAndWait(t, cancel, done)
 	if got := recv(t, msgs, "token"); got != `{"token":"abc"}` {
 		t.Fatalf("first message %q", got)
 	}
@@ -542,11 +528,8 @@ func TestRemoteRefreshesTokenOnAuthClose(t *testing.T) {
 		return "new", nil
 	}})
 	statuses := make(chan Status, 64)
-	ctx := context.Background()
-	if err := s.Start(ctx, Callbacks{Status: func(st Status) { statuses <- st }}); err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop(ctx)
+	cancel, done := runAsync(s, Callbacks{Status: func(st Status) { statuses <- st }})
+	defer cancelAndWait(t, cancel, done)
 	if got := recv(t, tokens, "old token"); got != `{"token":"old"}` {
 		t.Fatalf("%q", got)
 	}
@@ -556,6 +539,7 @@ func TestRemoteRefreshesTokenOnAuthClose(t *testing.T) {
 	if refreshes.Load() != 1 {
 		t.Fatalf("provider called %d times", refreshes.Load())
 	}
+	waitStatus(t, s, func(st Status) bool { return st.Main == Running })
 	sawReauth := false
 	for len(statuses) > 0 {
 		if st := <-statuses; st.Auth == Reauthenticating && st.AuthAttempts == 1 {
@@ -573,7 +557,7 @@ func TestRemoteFailsWithoutTokenProvider(t *testing.T) {
 		conn.Close(authCloseCode, "expired")
 	})
 	s, _ := NewRemote(Options{Addr: srv.URL, Token: "old"})
-	err := s.Start(context.Background(), Callbacks{})
+	err := s.Run(context.Background(), Callbacks{})
 	var e *Error
 	if !errors.As(err, &e) || e.Code != CodeAuthFailed {
 		t.Fatalf("got %v", err)

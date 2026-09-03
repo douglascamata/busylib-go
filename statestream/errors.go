@@ -16,7 +16,7 @@ const (
 	CodeStreamAlreadyStarted ErrorCode = "STREAM_ALREADY_STARTED"
 )
 
-// Error is reported through Callbacks.Error and returned by Start and Stop.
+// Error is reported through Callbacks.Error and returned by Run.
 type Error struct {
 	Code    ErrorCode
 	Message string

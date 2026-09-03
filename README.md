@@ -92,29 +92,35 @@ png.Encode(file, frame.ToImage(rgba, w, h))
 ```go
 stream, err := statestream.NewLocal(statestream.Options{Addr: "10.0.4.20"})
 
-err = stream.Start(ctx, statestream.Callbacks{
-    Data: func(st *statestream.State) {
-        for _, u := range st.Updates {
-            switch u.Kind {
-            case statestream.KindInput:
-                fmt.Println(u.GetInput())
-            case statestream.KindFrame:
-                img := u.Frame.Image() // already RGBA
+runCtx, cancel := context.WithCancel(ctx)
+done := make(chan error, 1)
+go func() {
+    done <- stream.Run(runCtx, statestream.Callbacks{
+        Data: func(st *statestream.State) {
+            for _, u := range st.Updates {
+                switch u.Kind {
+                case statestream.KindInput:
+                    fmt.Println(u.GetInput())
+                case statestream.KindFrame:
+                    img := u.Frame.Image() // already RGBA
+                }
             }
-        }
-    },
-    Status: func(st statestream.Status) { fmt.Println(st.Main, st.Connection, st.Data) },
-    Error:  func(e *statestream.Error) { fmt.Println(e.Code, e.Message) },
-})
+        },
+        Status: func(st statestream.Status) { fmt.Println(st.Main, st.Connection, st.Data) },
+        Error:  func(e *statestream.Error) { fmt.Println(e.Code, e.Message) },
+    })
+}()
 
-err = stream.Stop(ctx)
+// Cancel the stream and wait for Run to return.
+cancel()
+err = <-done
 ```
 
-`Start` returns once the stream is running, or with a `*statestream.Error`
-(`CodeConnectionTimeout`, `CodeConnectionFailed`, ...). After that the stream
-reconnects on its own, up to `MaxReconnectAttempts`, and reports
-`CodeReconnectFailed` when it gives up. `Status().Data` flips to `DataStale`
-when no message arrives for `DataTimeout`.
+`Run` blocks for the stream lifetime. Cancel its context to stop it. The caller
+starts a goroutine when it needs other work to continue. `Run` reconnects on
+its own, up to `MaxReconnectAttempts`. It returns `CodeReconnectFailed` when
+it gives up. `Status().Data` flips to `DataStale` when no message arrives for
+`DataTimeout`.
 
 Each `Update` embeds the decoded protobuf message, so `u.GetPower()`,
 `u.GetWifi()` and friends are available. The `statestream.BatteryStatus`,
@@ -130,8 +136,7 @@ values the HTTP API uses.
 - Mutating calls return only `error`; the `{"result":"OK"}` body is dropped.
 - `ScreenRenderer` (WebGL) has no Go counterpart. `frame.ToImage` gives you an
   `image.RGBA` to render however you like.
-- `StateStream` runs a goroutine instead of a shared worker. A failed `Start`
-  leaves nothing running.
+- `StateStream.Run` blocks. The caller owns its goroutine and cancellation.
 
 ## Development
 

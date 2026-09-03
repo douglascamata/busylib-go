@@ -224,14 +224,35 @@ func TestInputReachesStateStream(t *testing.T) {
 	s, err := statestream.NewLocal(statestream.Options{Addr: addr})
 	must(t, err)
 	updates := make(chan statestream.Update, 16)
-	must(t, s.Start(ctx, statestream.Callbacks{
-		Data: func(st *statestream.State) {
-			for _, u := range st.Updates {
-				updates <- u
-			}
-		},
-		Error: func(e *statestream.Error) { t.Errorf("stream error: %v", e) },
-	}))
+	ready := make(chan struct{}, 1)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Run(runCtx, statestream.Callbacks{
+			Data: func(st *statestream.State) {
+				for _, u := range st.Updates {
+					updates <- u
+				}
+			},
+			Status: func(st statestream.Status) {
+				if st.Main == statestream.Running {
+					select {
+					case ready <- struct{}{}:
+					default:
+					}
+				}
+			},
+			Error: func(e *statestream.Error) { t.Errorf("stream error: %v", e) },
+		})
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("stream stopped before it was ready: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the stream")
+	}
 	if st := s.Status(); st.Main != statestream.Running {
 		t.Fatalf("status %+v", st)
 	}
@@ -264,7 +285,10 @@ func TestInputReachesStateStream(t *testing.T) {
 			t.Fatalf("timed out waiting for input event %d", i)
 		}
 	}
-	must(t, s.Stop(ctx))
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v", err)
+	}
 	if st := s.Status(); st.Main != statestream.Stopped {
 		t.Fatalf("status after stop %+v", st)
 	}
