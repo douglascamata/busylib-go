@@ -60,3 +60,13 @@ func TestToImage(t *testing.T) {
 		t.Fatalf("unexpected image geometry %+v", img.Rect)
 	}
 }
+
+func TestToImagePanicsOnShortBuffer(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected a panic for a short buffer")
+		}
+	}()
+	w, h := Dimensions(Front)
+	ToImage(make([]byte, 1), w, h)
+}

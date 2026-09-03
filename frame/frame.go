@@ -5,6 +5,7 @@ package frame
 import (
 	"bytes"
 	"compress/zlib"
+	"fmt"
 	"image"
 	"io"
 )
@@ -111,7 +112,12 @@ func Inflate(data []byte) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-// ToImage wraps RGBA bytes in an image.RGBA without copying.
+// ToImage wraps RGBA bytes in an image.RGBA without copying. It panics when
+// the buffer is shorter than width*height*4, like image.NewRGBA does for bad
+// dimensions, because that is a caller bug and not a runtime condition.
 func ToImage(rgba []byte, width, height int) *image.RGBA {
+	if width < 0 || height < 0 || len(rgba) < width*height*4 {
+		panic(fmt.Sprintf("frame: RGBA buffer of %d bytes is shorter than %dx%dx4", len(rgba), width, height))
+	}
 	return &image.RGBA{Pix: rgba, Stride: width * 4, Rect: image.Rect(0, 0, width, height)}
 }
