@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -52,8 +53,8 @@ type Options struct {
 	// one (close code 3000). Remote only.
 	TokenProvider func(context.Context) (string, error)
 
-	ConnectTimeout       time.Duration
-	DataTimeout          time.Duration
+	ConnectTimeout time.Duration
+	DataTimeout    time.Duration
 	ReconnectDelay time.Duration
 	// MaxReconnectAttempts and MaxAuthAttempts count retries after the first
 	// failure. Zero selects the default; a negative value disables retries, so
@@ -65,7 +66,8 @@ type Options struct {
 }
 
 // Callbacks receive stream events. Every field is optional. Callbacks run on
-// the stream's goroutine, so they must not block for long.
+// the stream's goroutine, so they must not block for long. A callback may call
+// Stop; see Stop for what that means.
 type Callbacks struct {
 	Data    func(*State)
 	RawData func([]byte)
@@ -100,9 +102,10 @@ type Stream struct {
 	conn      *websocket.Conn
 	cancel    context.CancelFunc
 	done      chan struct{}
-	stopping  bool
 	dataTimer *time.Timer
 	subs      map[string]struct{}
+	// inCallback counts callbacks that are executing right now.
+	inCallback atomic.Int32
 }
 
 // NewLocal creates a stream to a device on the local network.
@@ -195,7 +198,6 @@ func (s *Stream) Start(ctx context.Context, cb Callbacks) error {
 		return newError(CodeStreamAlreadyStarted, "stream is already running; call Stop first")
 	}
 	s.cb = cb
-	s.stopping = false
 	runCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	done := make(chan struct{})
@@ -230,13 +232,17 @@ func (s *Stream) Start(ctx context.Context, cb Callbacks) error {
 
 // Stop closes the connection gracefully and clears the callbacks. It returns
 // an Error with CodeConnectionLost when the WebSocket did not close cleanly.
+//
+// Stop waits for the stream goroutine to exit, unless a callback is executing
+// when Stop is called. Then it returns as soon as the connection is closed,
+// because the goroutine that must exit may be the one running the callback.
+// The executing callback finishes; no later callback fires.
 func (s *Stream) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	if s.status.Main == Idle || s.status.Main == Stopped {
 		s.mu.Unlock()
 		return nil
 	}
-	s.stopping = true
 	if s.dataTimer != nil {
 		s.dataTimer.Stop()
 	}
@@ -252,11 +258,17 @@ func (s *Stream) Stop(ctx context.Context) error {
 	return err
 }
 
-// shutdown closes the socket, ends the run goroutine and waits for it.
+// shutdown cancels the run goroutine, closes the socket and waits for the
+// goroutine. Cancelling first tells run that the close is intended. The close
+// is what wakes the read. shutdown does not wait while a callback is
+// executing: the run goroutine may be the caller, and it exits on its own
+// once the callback returns.
 func (s *Stream) shutdown(ctx context.Context) error {
 	s.mu.Lock()
-	s.stopping = true
-	conn, cancel, done := s.conn, s.cancel, s.done
+	if s.cancel != nil {
+		s.cancel()
+	}
+	conn, done := s.conn, s.done
 	if s.dataTimer != nil {
 		s.dataTimer.Stop()
 	}
@@ -265,10 +277,7 @@ func (s *Stream) shutdown(ctx context.Context) error {
 	if conn != nil {
 		closeErr = conn.Close(websocket.StatusNormalClosure, "")
 	}
-	if cancel != nil {
-		cancel()
-	}
-	if done != nil {
+	if done != nil && s.inCallback.Load() == 0 {
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -335,12 +344,19 @@ func (s *Stream) run(ctx context.Context, ready chan<- error, done chan struct{}
 		closeCode := websocket.StatusCode(-1)
 		var readErr error
 		if dialErr == nil {
+			if !s.adopt(ctx, conn) {
+				_ = conn.Close(websocket.StatusNormalClosure, "")
+				return
+			}
 			connectedOnce = true
 			retries, authRetries = 0, 0
 			s.onOpen(ctx, conn, signal)
-			closeCode, readErr = s.readLoop(ctx, conn, signal)
-			s.setConn(nil)
+			closeCode, readErr = s.readLoop(conn, signal)
+			s.clearConn(conn)
 		} else {
+			if ctx.Err() != nil {
+				return
+			}
 			e := newError(CodeConnectionFailed, "websocket connection error: "+dialErr.Error())
 			s.mapErrorToStatus(e)
 			s.emitError(e)
@@ -349,7 +365,7 @@ func (s *Stream) run(ctx context.Context, ready chan<- error, done chan struct{}
 				return
 			}
 		}
-		if s.isStopping() || errors.Is(readErr, errFatalDeviceError) {
+		if ctx.Err() != nil || errors.Is(readErr, errFatalDeviceError) {
 			return
 		}
 
@@ -371,7 +387,9 @@ func (s *Stream) run(ctx context.Context, ready chan<- error, done chan struct{}
 				signal(e)
 				return
 			}
-			token, err := s.opts.TokenProvider(ctx)
+			var token string
+			var err error
+			s.call(func() { token, err = s.opts.TokenProvider(ctx) })
 			if err != nil {
 				e := newError(CodeAuthRefreshFailed, "failed to refresh token: "+err.Error())
 				s.mapErrorToStatus(e)
@@ -420,7 +438,6 @@ func (s *Stream) dial(ctx context.Context) (*websocket.Conn, error) {
 }
 
 func (s *Stream) onOpen(ctx context.Context, conn *websocket.Conn, signal func(error)) {
-	s.setConn(conn)
 	s.patch(func(st *Status) { st.Connection = Connected; st.ConnectionAttempts = 0 })
 	if !s.remote {
 		_ = writeJSON(ctx, conn, map[string]bool{"enable": true})
@@ -445,17 +462,20 @@ func (s *Stream) onOpen(ctx context.Context, conn *websocket.Conn, signal func(e
 }
 
 // readLoop delivers messages until the connection ends. It returns the close
-// code (or -1 when the connection did not end with a close frame).
-func (s *Stream) readLoop(ctx context.Context, conn *websocket.Conn, signal func(error)) (websocket.StatusCode, error) {
+// code (or -1 when the connection did not end with a close frame). The read
+// has no cancellable context on purpose: cancelling one force-closes the
+// socket without a close handshake. shutdown closes the socket instead, and
+// that wakes the read.
+func (s *Stream) readLoop(conn *websocket.Conn, signal func(error)) (websocket.StatusCode, error) {
 	authReported := false
 	for {
-		typ, data, err := conn.Read(ctx)
+		typ, data, err := conn.Read(context.Background())
 		if err != nil {
 			return websocket.CloseStatus(err), err
 		}
 		s.touchData()
 		if cb := s.callbacks(); cb.RawData != nil {
-			cb.RawData(data)
+			s.call(func() { cb.RawData(data) })
 		}
 		if s.handleMessage(typ, data, &authReported, signal) {
 			_ = conn.Close(websocket.StatusInternalError, "fatal device error")
@@ -481,7 +501,7 @@ func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authRepor
 		}
 		if strings.HasPrefix(env.Type, "device.") {
 			if cb := s.callbacks(); cb.DeviceEvent != nil {
-				cb.DeviceEvent(DeviceEvent{Type: env.Type, Device: env.Device})
+				s.call(func() { cb.DeviceEvent(DeviceEvent{Type: env.Type, Device: env.Device}) })
 			}
 			return false
 		}
@@ -515,13 +535,16 @@ func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authRepor
 			Data:    raw.Error,
 		}
 		s.mapErrorToStatus(e)
-		s.emitError(e)
-		switch raw.Error.GetSeverity() {
-		case pb.Severity_FATAL:
+		fatal := raw.Error.GetSeverity() == pb.Severity_FATAL
+		if fatal {
 			s.patch(func(st *Status) { st.Main = Failed })
+		}
+		s.emitError(e)
+		switch {
+		case fatal:
 			signal(e)
 			return true
-		case pb.Severity_ERROR:
+		case raw.Error.GetSeverity() == pb.Severity_ERROR:
 			return false
 		}
 	}
@@ -529,7 +552,7 @@ func (s *Stream) handleMessage(typ websocket.MessageType, data []byte, authRepor
 		s.emitError(&Error{Code: CodeFrameProcessError, Message: err.Error()})
 	})
 	if cb := s.callbacks(); cb.Data != nil {
-		cb.Data(state)
+		s.call(func() { cb.Data(state) })
 	}
 	return false
 }
@@ -565,16 +588,33 @@ func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {
 	return conn.Write(wctx, websocket.MessageText, b)
 }
 
-func (s *Stream) setConn(conn *websocket.Conn) {
+// adopt stores a freshly dialed connection. It reports false when shutdown
+// already ran, in which case the caller owns closing conn. The check and the
+// store happen under one lock, so exactly one side closes the socket.
+func (s *Stream) adopt(ctx context.Context, conn *websocket.Conn) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
 	s.conn = conn
+	return true
+}
+
+// clearConn forgets conn unless a newer connection has replaced it.
+func (s *Stream) clearConn(conn *websocket.Conn) {
+	s.mu.Lock()
+	if s.conn == conn {
+		s.conn = nil
+	}
 	s.mu.Unlock()
 }
 
-func (s *Stream) isStopping() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.stopping
+// call runs user code and counts it while it executes. See shutdown.
+func (s *Stream) call(fn func()) {
+	s.inCallback.Add(1)
+	defer s.inCallback.Add(-1)
+	fn()
 }
 
 func (s *Stream) callbacks() Callbacks {
@@ -590,13 +630,13 @@ func (s *Stream) patch(fn func(*Status)) {
 	snap, cb := s.status, s.cb
 	s.mu.Unlock()
 	if cb.Status != nil {
-		cb.Status(snap)
+		s.call(func() { cb.Status(snap) })
 	}
 }
 
 func (s *Stream) emitError(e *Error) {
 	if cb := s.callbacks(); cb.Error != nil {
-		cb.Error(e)
+		s.call(func() { cb.Error(e) })
 	}
 }
 
@@ -634,6 +674,6 @@ func (s *Stream) touchData() {
 	snap, cb := s.status, s.cb
 	s.mu.Unlock()
 	if changed && cb.Status != nil {
-		cb.Status(snap)
+		s.call(func() { cb.Status(snap) })
 	}
 }

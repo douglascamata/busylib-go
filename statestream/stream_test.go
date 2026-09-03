@@ -320,6 +320,71 @@ func TestFatalDeviceErrorEndsStream(t *testing.T) {
 	}
 }
 
+func TestStopFromCallbackDoesNotDeadlock(t *testing.T) {
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		ctx := context.Background()
+		conn.Read(ctx)
+		b, _ := proto.Marshal(&pb.State{Error: &pb.Error{Cause: pb.Cause_RESOURCE_LIMIT, Severity: pb.Severity_FATAL}})
+		conn.Write(ctx, websocket.MessageBinary, b)
+		conn.Read(ctx)
+	})
+	s, _ := NewLocal(Options{Addr: srv.URL})
+	ctx := context.Background()
+	stopped := make(chan error, 1)
+	if err := s.Start(ctx, Callbacks{Error: func(*Error) { stopped <- s.Stop(ctx) }}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, stopped, "Stop to return inside the callback"); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, s.done, "run goroutine to exit")
+	if st := s.Status(); st.Main != Stopped || st.Connection != Disconnected {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+func TestRestartFromCallbackDoesNotDisturbNewSession(t *testing.T) {
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		ctx := context.Background()
+		conn.Read(ctx)
+		conn.Write(ctx, websocket.MessageBinary, inputState(t))
+		conn.Read(ctx)
+	})
+	s, _ := NewLocal(Options{Addr: srv.URL})
+	ctx := context.Background()
+	restarted := make(chan error, 1)
+	second := make(chan *State, 1)
+	err := s.Start(ctx, Callbacks{Data: func(*State) {
+		if err := s.Stop(ctx); err != nil {
+			restarted <- err
+			return
+		}
+		restarted <- s.Start(ctx, Callbacks{Data: func(st *State) { second <- st }})
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDone := s.done
+	if err := recv(t, restarted, "restart inside the callback"); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(ctx)
+	recv(t, second, "data from the second connection")
+	recv(t, firstDone, "first run goroutine to exit")
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	if conn == nil {
+		t.Fatal("the first run goroutine cleared the second connection")
+	}
+	if st := s.Status(); st.Main != Running || st.Connection != Connected {
+		t.Fatalf("status %+v", st)
+	}
+	if srv.accepts.Load() != 2 {
+		t.Fatalf("accepts %d", srv.accepts.Load())
+	}
+}
+
 func TestRemoteAuthSubscribeAndEnvelope(t *testing.T) {
 	msgs := make(chan string, 4)
 	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
