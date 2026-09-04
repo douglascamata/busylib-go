@@ -2,6 +2,8 @@ package busybar
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -63,6 +65,45 @@ type BusyProfile struct {
 	TimerSettings      BusyTimerSettings `json:"timer_settings"`
 	BusyBarSettings    BusyBarSettings   `json:"busy_bar_settings"`
 	ProfileTimestampMs int64             `json:"profile_timestamp_ms"`
+}
+
+// MarshalJSON includes required zero values only for the selected timer type.
+func (s BusyTimerSettings) MarshalJSON() ([]byte, error) {
+	fields := map[string]any{"type": s.Type}
+	switch s.Type {
+	case BusyInfinite:
+	case BusySimple:
+		fields["total_time_ms"] = s.TotalTimeMs
+	case BusyInterval:
+		fields["interval_work_ms"] = s.IntervalWorkMs
+		fields["interval_rest_ms"] = s.IntervalRestMs
+		fields["interval_work_cycles_count"] = s.IntervalWorkCyclesCount
+		fields["is_autostart_enabled"] = s.IsAutostartEnabled
+	default:
+		return nil, fmt.Errorf("busybar: unsupported timer settings type %q", s.Type)
+	}
+	return json.Marshal(fields)
+}
+
+// MarshalJSON includes the fields required by the selected snapshot type.
+func (s BusySnapshotState) MarshalJSON() ([]byte, error) {
+	fields := map[string]any{"type": s.Type, "busy_bar_settings": s.BusyBarSettings}
+	switch s.Type {
+	case BusyNotStarted:
+		return json.Marshal(fields)
+	case BusyInfinite:
+	case BusySimple:
+		fields["time_left_ms"] = s.TimeLeftMs
+	case BusyInterval:
+		fields["current_interval"] = s.CurrentInterval
+		fields["current_interval_time_total_ms"] = s.CurrentIntervalTimeTotalMs
+		fields["current_interval_time_left_ms"] = s.CurrentIntervalTimeLeftMs
+		fields["interval_settings"] = s.IntervalSettings
+	default:
+		return nil, fmt.Errorf("busybar: unsupported snapshot type %q", s.Type)
+	}
+	fields["card_id"], fields["is_paused"] = s.CardID, s.IsPaused
+	return json.Marshal(fields)
 }
 
 // BusySnapshotGet returns the running timer state.

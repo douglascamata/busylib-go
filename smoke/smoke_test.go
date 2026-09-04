@@ -202,6 +202,29 @@ func TestBusySnapshot(t *testing.T) {
 	}
 }
 
+func TestBusyIntervalProfile(t *testing.T) {
+	c, _ := newClient(t)
+	ctx := context.Background()
+	original, err := c.BusyProfileGet(ctx, busybar.BusySlotCustom)
+	must(t, err)
+	t.Cleanup(func() { c.BusyProfileSet(ctx, busybar.BusySlotCustom, *original) })
+
+	profile := *original
+	profile.TimerSettings = busybar.BusyTimerSettings{
+		Type: busybar.BusyInterval, IntervalWorkMs: 120000,
+		IntervalRestMs: 60000, IntervalWorkCyclesCount: 3,
+	}
+	for _, autostart := range []bool{true, false} {
+		profile.TimerSettings.IsAutostartEnabled = autostart
+		must(t, c.BusyProfileSet(ctx, busybar.BusySlotCustom, profile))
+		stored, err := c.BusyProfileGet(ctx, busybar.BusySlotCustom)
+		must(t, err)
+		if stored.TimerSettings != profile.TimerSettings {
+			t.Fatalf("stored timer %+v, want %+v", stored.TimerSettings, profile.TimerSettings)
+		}
+	}
+}
+
 func TestAudioVolume(t *testing.T) {
 	c, _ := newClient(t)
 	ctx := context.Background()
