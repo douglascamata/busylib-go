@@ -335,6 +335,81 @@ func TestDataGoesStaleWithoutMessages(t *testing.T) {
 	waitStatus(t, s, func(st Status) bool { return st.Data == DataStale })
 }
 
+func TestReadyFiresOncePerRunNotPerReconnect(t *testing.T) {
+	srv := newWSServer(t, func(conn *websocket.Conn, n int32) {
+		ctx := context.Background()
+		conn.Read(ctx)
+		if n == 1 {
+			conn.Close(websocket.StatusInternalError, "boom")
+			return
+		}
+		conn.Write(ctx, websocket.MessageBinary, inputState(t))
+		conn.Read(ctx)
+	})
+	s, _ := NewLocal(Options{Addr: srv.URL, ReconnectDelay: 10 * time.Millisecond})
+	var readyCalls atomic.Int32
+	readyStatus := make(chan Status, 1)
+	data := make(chan *State, 1)
+	cancel, done := runAsync(s, Callbacks{
+		Ready: func() {
+			if readyCalls.Add(1) == 1 {
+				readyStatus <- s.Status()
+			}
+		},
+		Data: func(st *State) { data <- st },
+	})
+	if st := recv(t, readyStatus, "Ready"); st.Main != Running || st.Connection != Connected {
+		t.Fatalf("status inside Ready %+v", st)
+	}
+	recv(t, data, "data from the second connection")
+	cancelAndWait(t, cancel, done)
+	if n := readyCalls.Load(); n != 1 {
+		t.Fatalf("Ready called %d times across a reconnect, want 1", n)
+	}
+}
+
+func TestDataGoesStaleAcrossReconnect(t *testing.T) {
+	srv := newWSServer(t, func(conn *websocket.Conn, n int32) {
+		ctx := context.Background()
+		conn.Read(ctx)
+		if n == 1 {
+			conn.Write(ctx, websocket.MessageBinary, inputState(t))
+			conn.Close(websocket.StatusInternalError, "boom")
+			return
+		}
+		// The second connection never sends anything.
+		conn.Read(ctx)
+	})
+	s, _ := NewLocal(Options{Addr: srv.URL, DataTimeout: 50 * time.Millisecond, ReconnectDelay: 10 * time.Millisecond})
+	cancel, done := runAsync(s, Callbacks{})
+	defer cancelAndWait(t, cancel, done)
+	waitStatus(t, s, func(st Status) bool { return st.Data == DataActive })
+	st := waitStatus(t, s, func(st Status) bool { return st.Data == DataStale })
+	if st.Connection != Connected || srv.accepts.Load() != 2 {
+		t.Fatalf("stale must be reported on the reconnected socket: %+v, accepts %d", st, srv.accepts.Load())
+	}
+}
+
+func TestDialTimeoutReportsConnectionTimeout(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	s, _ := NewLocal(Options{Addr: "ws://example.invalid", HTTPClient: client, ConnectTimeout: 50 * time.Millisecond})
+	errs := make(chan *Error, 1)
+	err := s.Run(context.Background(), Callbacks{Error: func(e *Error) { errs <- e }})
+	var e *Error
+	if !errors.As(err, &e) || e.Code != CodeConnectionTimeout {
+		t.Fatalf("got %v", err)
+	}
+	if recv(t, errs, "error callback").Code != CodeConnectionTimeout {
+		t.Fatal("error callback code")
+	}
+	if st := s.Status(); st.Main != Failed || st.MainError != e {
+		t.Fatalf("status %+v", st)
+	}
+}
+
 func TestCallbacksDoNotOverlap(t *testing.T) {
 	sendSecond := make(chan struct{})
 	secondSent := make(chan struct{})
@@ -486,7 +561,12 @@ func TestRemoteAuthSubscribeAndEnvelope(t *testing.T) {
 	}
 	data := make(chan *State, 1)
 	events := make(chan DeviceEvent, 1)
-	cancel, done := runAsync(s, Callbacks{Data: func(st *State) { data <- st }, DeviceEvent: func(e DeviceEvent) { events <- e }})
+	var readyCalls atomic.Int32
+	cancel, done := runAsync(s, Callbacks{
+		Ready:       func() { readyCalls.Add(1) },
+		Data:        func(st *State) { data <- st },
+		DeviceEvent: func(e DeviceEvent) { events <- e },
+	})
 	defer cancelAndWait(t, cancel, done)
 	if got := recv(t, msgs, "token"); got != `{"token":"abc"}` {
 		t.Fatalf("first message %q", got)
@@ -502,6 +582,9 @@ func TestRemoteAuthSubscribeAndEnvelope(t *testing.T) {
 	}
 	if st := s.Status(); st.Main != Running || st.Auth != Authenticated {
 		t.Fatalf("status %+v", st)
+	}
+	if n := readyCalls.Load(); n != 1 {
+		t.Fatalf("Ready called %d times before the first state, want 1", n)
 	}
 }
 

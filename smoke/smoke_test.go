@@ -235,14 +235,7 @@ func TestInputReachesStateStream(t *testing.T) {
 					updates <- u
 				}
 			},
-			Status: func(st statestream.Status) {
-				if st.Main == statestream.Running {
-					select {
-					case ready <- struct{}{}:
-					default:
-					}
-				}
-			},
+			Ready: func() { ready <- struct{}{} },
 			Error: func(e *statestream.Error) { t.Errorf("stream error: %v", e) },
 		})
 	}()

@@ -96,6 +96,7 @@ runCtx, cancel := context.WithCancel(ctx)
 done := make(chan error, 1)
 go func() {
     done <- stream.Run(runCtx, statestream.Callbacks{
+        Ready: func() { fmt.Println("connected") },
         Data: func(st *statestream.State) {
             for _, u := range st.Updates {
                 switch u.Kind {
@@ -117,10 +118,14 @@ err = <-done
 ```
 
 `Run` blocks for the stream lifetime. Cancel its context to stop it. The caller
-starts a goroutine when it needs other work to continue. `Run` reconnects on
-its own, up to `MaxReconnectAttempts`. It returns `CodeReconnectFailed` when
-it gives up. `Status().Data` flips to `DataStale` when no message arrives for
-`DataTimeout`.
+starts a goroutine when it needs other work to continue. `Ready` fires once
+per `Run` when the stream is connected (and, for remote streams,
+authenticated). `Run` reconnects on its own, up to `MaxReconnectAttempts`. It
+returns `CodeReconnectFailed` when it gives up. `Status().Data` flips to
+`DataStale` when no message arrives for `DataTimeout`, even across a
+reconnect. Callbacks run one at a time on the `Run` goroutine, and a callback
+may cancel the context; after that only a final `Status` with `Main ==
+Stopped` is reported.
 
 Each `Update` embeds the decoded protobuf message, so `u.GetPower()`,
 `u.GetWifi()` and friends are available. The `statestream.BatteryStatus`,
