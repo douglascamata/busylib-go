@@ -169,8 +169,11 @@ make update-protos   # fetch the latest bsb-protobuf schemas, then regenerate
 
 The smoke tests drive the HTTP client and the WebSocket stream against
 [busybar-emulator](https://github.com/maxswinkels/busybar-emulator). The
-script clones it into `.cache/` on first run; set `BUSYBAR_EMULATOR_DIR` to
-reuse a checkout.
+script clones the revision in `scripts/emulator-revision` into `.cache/` on
+first run. Set `BUSYBAR_EMULATOR_DIR` to reuse a clean checkout of that revision.
+Existing checkouts are never reset by the script.
+
+CI runs the unit tests, lint checks, and pinned emulator smoke tests.
 
 ## License
 

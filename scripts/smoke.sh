@@ -10,9 +10,15 @@ cd "$(dirname "$0")/.."
 
 DIR="${BUSYBAR_EMULATOR_DIR:-.cache/busybar-emulator}"
 PORT="${PORT:-18080}"
+REVISION="$(cat scripts/emulator-revision)"
 
 if [ ! -f "$DIR/server.js" ]; then
-  git clone --depth 1 https://github.com/maxswinkels/busybar-emulator.git "$DIR"
+  git clone --no-checkout https://github.com/maxswinkels/busybar-emulator.git "$DIR"
+  git -C "$DIR" checkout --detach "$REVISION"
+fi
+if [ "$(git -C "$DIR" rev-parse HEAD)" != "$REVISION" ] || ! git -C "$DIR" diff --quiet HEAD; then
+  echo "emulator must be a clean checkout of $REVISION; set BUSYBAR_EMULATOR_DIR to that checkout" >&2
+  exit 1
 fi
 
 LOG="$(mktemp -t busybar-emulator.XXXXXX)"
