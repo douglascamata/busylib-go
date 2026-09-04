@@ -32,6 +32,11 @@ func TestNewResolvesAddr(t *testing.T) {
 		{"proxy defaults to https", Config{Addr: "api.busy.app", Token: "t"}, "https://api.busy.app", "https://api.busy.app/busybar", false},
 		{"proxy keeps explicit http", Config{Addr: "http://api.dev.busy.app", Token: "t"}, "http://api.dev.busy.app", "http://api.dev.busy.app/busybar", false},
 		{"proxy needs token", Config{Addr: "api.busy.app"}, "", "", true},
+		{"https default port", Config{Addr: "https://api.busy.app:443", Token: "t"}, "https://api.busy.app", "https://api.busy.app/busybar", false},
+		{"http default port", Config{Addr: "http://api.busy.app:80", Token: "t"}, "http://api.busy.app", "http://api.busy.app/busybar", false},
+		{"default port needs token", Config{Addr: "https://api.busy.app:443"}, "", "", true},
+		{"custom proxy port is a device origin", Config{Addr: "https://api.busy.app:8443"}, "https://api.busy.app:8443", "https://api.busy.app:8443/api", false},
+		{"ipv6 default port", Config{Addr: "http://[::1]:80"}, "http://[::1]", "http://[::1]/api", false},
 		{"garbage", Config{Addr: "http://"}, "", "", true},
 	}
 	for _, tc := range cases {

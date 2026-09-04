@@ -68,12 +68,12 @@ type versionFetch struct {
 // New builds a client. It returns an error when Addr is not a valid address,
 // or when Addr points at the BUSY proxy and Token is empty.
 func New(cfg Config) (*Client, error) {
-	addr, err := resolveAddr(cfg)
+	addr, proxy, err := resolveAddr(cfg)
 	if err != nil {
 		return nil, err
 	}
 	prefix := "/api"
-	if proxyHostRe.MatchString(addr) {
+	if proxy {
 		prefix = "/busybar"
 	}
 	c := &Client{
@@ -93,12 +93,12 @@ func New(cfg Config) (*Client, error) {
 	return c, nil
 }
 
-func resolveAddr(cfg Config) (string, error) {
+func resolveAddr(cfg Config) (string, bool, error) {
 	if cfg.Addr == "" {
 		if cfg.Token == "" {
-			return DefaultDeviceURL, nil
+			return DefaultDeviceURL, false, nil
 		}
-		return DefaultProxyURL, nil
+		return DefaultProxyURL, true, nil
 	}
 	addr := strings.TrimSpace(cfg.Addr)
 	explicitScheme := strings.HasPrefix(strings.ToLower(addr), "http://") || strings.HasPrefix(strings.ToLower(addr), "https://")
@@ -107,16 +107,22 @@ func resolveAddr(cfg Config) (string, error) {
 	}
 	u, err := url.Parse(addr)
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("busybar: invalid address %q", cfg.Addr)
+		return "", false, fmt.Errorf("busybar: invalid address %q", cfg.Addr)
 	}
-	origin := strings.ToLower(u.Scheme) + "://" + u.Host
-	if !explicitScheme && proxyHostRe.MatchString(origin) {
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
+		u.Host = strings.TrimSuffix(u.Host, ":"+u.Port())
+	}
+	origin := u.Scheme + "://" + u.Host
+	proxy := proxyHostRe.MatchString(origin)
+	if !explicitScheme && proxy {
 		origin = "https://" + u.Host
 	}
-	if proxyHostRe.MatchString(origin) && cfg.Token == "" {
-		return "", errors.New("busybar: token is required for the BUSY proxy")
+	if proxy && cfg.Token == "" {
+		return "", false, errors.New("busybar: token is required for the BUSY proxy")
 	}
-	return origin, nil
+	return origin, proxy, nil
 }
 
 // Addr returns the normalized origin the client talks to, e.g. http://10.0.4.20.
