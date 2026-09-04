@@ -1,8 +1,11 @@
 package statestream
 
 import (
+	"bytes"
+	"compress/zlib"
 	"fmt"
 	"image"
+	"io"
 
 	"github.com/douglascamata/busylib-go/frame"
 	"github.com/douglascamata/busylib-go/statestream/pb"
@@ -88,40 +91,92 @@ func kindOf(u *pb.StateUpdate) UpdateKind {
 	return UpdateKind(fd.Name())
 }
 
-// DecodeFrame decompresses a protobuf frame and converts it to RGBA. It
-// returns nil, nil for a frame without dimensions.
+// DecodeFrame validates a complete display frame, decompresses it, and converts
+// it to RGBA. Invalid geometry, formats, encodings, and payloads return an error.
 func DecodeFrame(f *pb.Frame) ([]byte, error) {
-	w, h := int(f.GetWidth()), int(f.GetHeight())
-	if w == 0 || h == 0 {
-		return nil, nil
+	if f.GetScreen() != pb.Screen_FRONT && f.GetScreen() != pb.Screen_BACK {
+		return nil, fmt.Errorf("statestream: unknown frame screen %d", f.GetScreen())
+	}
+	w, h := frame.Dimensions(frame.Display(f.GetScreen()))
+	if f.GetWidth() != uint32(w) || f.GetHeight() != uint32(h) {
+		return nil, fmt.Errorf("statestream: frame dimensions %dx%d, want %dx%d", f.GetWidth(), f.GetHeight(), w, h)
+	}
+	size, blockSize := w*h, 1
+	switch f.GetPixelFormat() {
+	case pb.PixelFormat_RGB888:
+		size *= 3
+		blockSize = 3
+	case pb.PixelFormat_L4:
+		size /= 2
+		blockSize = 2
+	case pb.PixelFormat_L8:
+	default:
+		return nil, fmt.Errorf("statestream: unknown frame pixel format %d", f.GetPixelFormat())
 	}
 	data := f.GetData()
-	blockSize := 1
-	if f.GetPixelFormat() == pb.PixelFormat_RGB888 {
-		blockSize = 3
+	// The protocol's frame.options declares a 16 KiB data limit.
+	if len(data) > 16384 {
+		return nil, fmt.Errorf("statestream: frame payload exceeds 16384 bytes")
 	}
-	var err error
 	switch f.GetEncoding() {
-	case pb.Encoding_RUN_LENGTH:
-		data = frame.DecompressRLE(data, blockSize)
-	case pb.Encoding_DEFLATE:
-		data, err = frame.Inflate(data)
-	case pb.Encoding_DEFLATE_RUN_LENGTH:
-		if data, err = frame.Inflate(data); err == nil {
-			data = frame.DecompressRLE(data, blockSize)
+	case pb.Encoding_PLAIN, pb.Encoding_RUN_LENGTH:
+	case pb.Encoding_DEFLATE, pb.Encoding_DEFLATE_RUN_LENGTH:
+		limit := size
+		if f.GetEncoding() == pb.Encoding_DEFLATE_RUN_LENGTH {
+			// Each nonempty RLE opcode represents at least one block.
+			limit += size / blockSize
 		}
+		r, err := zlib.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("statestream: frame decompression failed: %w", err)
+		}
+		data, err = io.ReadAll(io.LimitReader(r, int64(limit)+1))
+		_ = r.Close()
+		if err != nil {
+			return nil, fmt.Errorf("statestream: frame decompression failed: %w", err)
+		}
+		if len(data) > limit {
+			return nil, fmt.Errorf("statestream: inflated frame exceeds %d bytes", limit)
+		}
+	default:
+		return nil, fmt.Errorf("statestream: unknown frame encoding %d", f.GetEncoding())
 	}
-	if err != nil {
-		return nil, fmt.Errorf("statestream: frame decompression failed: %w", err)
+	if f.GetEncoding() == pb.Encoding_RUN_LENGTH || f.GetEncoding() == pb.Encoding_DEFLATE_RUN_LENGTH {
+		// Validate the complete RLE stream before the helper allocates its output.
+		decodedSize := 0
+		for i := 0; i < len(data); {
+			opcode := data[i]
+			i++
+			count := int(opcode & 0x7f)
+			if count == 0 {
+				return nil, fmt.Errorf("statestream: zero-length RLE block")
+			}
+			encodedSize := blockSize
+			if opcode&0x80 != 0 {
+				encodedSize *= count
+			}
+			if encodedSize > len(data)-i {
+				return nil, fmt.Errorf("statestream: truncated RLE block")
+			}
+			decodedSize += count * blockSize
+			if decodedSize > size {
+				return nil, fmt.Errorf("statestream: RLE frame exceeds %d bytes", size)
+			}
+			i += encodedSize
+		}
+		if decodedSize != size {
+			return nil, fmt.Errorf("statestream: decoded frame has %d bytes, want %d", decodedSize, size)
+		}
+		data = frame.DecompressRLE(data, blockSize)
+	} else if len(data) != size {
+		return nil, fmt.Errorf("statestream: decoded frame has %d bytes, want %d", len(data), size)
 	}
 	switch f.GetPixelFormat() {
 	case pb.PixelFormat_L4:
 		return frame.L4ToRGBA(data, w, h), nil
 	case pb.PixelFormat_L8:
 		return frame.L8ToRGBA(data, w, h), nil
-	case pb.PixelFormat_RGB888:
+	default: // RGB888, checked above.
 		return frame.BGRToRGBA(data, w, h), nil
-	default:
-		return make([]byte, w*h*4), nil
 	}
 }

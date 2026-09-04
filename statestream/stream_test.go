@@ -1,6 +1,7 @@
 package statestream
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -57,7 +58,7 @@ func inputState(t *testing.T) []byte {
 	t.Helper()
 	b, err := proto.Marshal(&pb.State{Timestamp: 7, Updates: []*pb.StateUpdate{
 		{State: &pb.StateUpdate_Input{Input: &pb.InputEvent{Event: &pb.InputEvent_ButtonEvent{ButtonEvent: &pb.ButtonEvent{Button: pb.Button_BACK}}}}},
-		{State: &pb.StateUpdate_Frame{Frame: &pb.Frame{Width: 4, Height: 1, Encoding: pb.Encoding_RUN_LENGTH, PixelFormat: pb.PixelFormat_RGB888, Data: []byte{0x81, 1, 2, 3, 0x03, 9, 9, 9}}}},
+		{State: &pb.StateUpdate_Frame{Frame: &pb.Frame{Width: 72, Height: 16, Encoding: pb.Encoding_RUN_LENGTH, PixelFormat: pb.PixelFormat_RGB888, Data: append(append([]byte{0x81, 1, 2, 3}, bytes.Repeat([]byte{127, 9, 9, 9}, 9)...), 8, 9, 9, 9)}}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +147,7 @@ func TestLocalStreamDeliversDecodedUpdatesAndStopsCleanly(t *testing.T) {
 	if st.Updates[0].GetInput().GetButtonEvent().GetButton() != pb.Button_BACK {
 		t.Fatalf("button %v", st.Updates[0].GetInput())
 	}
-	if f := st.Updates[1].Frame; f == nil || f.RGBA[0] != 3 || f.RGBA[4] != 9 || len(f.RGBA) != 16 {
+	if f := st.Updates[1].Frame; f == nil || f.RGBA[0] != 3 || f.RGBA[4] != 9 || len(f.RGBA) != 72*16*4 {
 		t.Fatalf("frame %+v", st.Updates[1].Frame)
 	}
 	if len(recv(t, raw, "raw")) == 0 {
@@ -162,6 +163,47 @@ func TestLocalStreamDeliversDecodedUpdatesAndStopsCleanly(t *testing.T) {
 	}
 	if got := s.Status(); got.Main != Stopped || got.Connection != Disconnected || got.Data != DataNone {
 		t.Fatalf("status after stop %+v", got)
+	}
+}
+
+func TestMalformedFrameReportsErrorAndStreamContinues(t *testing.T) {
+	valid := inputState(t)
+	var state pb.State
+	if err := proto.Unmarshal(valid, &state); err != nil {
+		t.Fatal(err)
+	}
+	state.Updates[1].GetFrame().Width = ^uint32(0)
+	malformed, err := proto.Marshal(&state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		ctx := context.Background()
+		if _, _, err := conn.Read(ctx); err != nil {
+			return
+		}
+		conn.Write(ctx, websocket.MessageBinary, malformed)
+		conn.Write(ctx, websocket.MessageBinary, valid)
+		conn.Read(ctx)
+	})
+	s, err := NewLocal(Options{Addr: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures := make(chan *Error, 2)
+	states := make(chan *State, 2)
+	cancel, done := runAsync(s, Callbacks{Error: func(e *Error) { failures <- e }, Data: func(st *State) { states <- st }})
+	defer cancelAndWait(t, cancel, done)
+	if e := recv(t, failures, "frame error"); e.Code != CodeFrameProcessError || e.Unwrap() == nil {
+		t.Fatalf("unexpected error %+v", e)
+	}
+	first := recv(t, states, "state with malformed frame")
+	if first.Updates[0].GetInput() == nil || first.Updates[1].Frame != nil {
+		t.Fatal("malformed frame affected another update or was delivered as an image")
+	}
+	next := recv(t, states, "next valid state")
+	if next.Updates[1].Frame == nil || len(next.Updates[1].Frame.RGBA) != 72*16*4 {
+		t.Fatal("stream did not deliver the next valid frame")
 	}
 }
 
