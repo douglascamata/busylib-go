@@ -53,11 +53,16 @@ type Client struct {
 	http    *http.Client
 	timeout time.Duration
 
-	mu        sync.RWMutex
-	token     string
-	apiKey    string
-	apiSemver string
-	versionMu sync.Mutex
+	mu           sync.RWMutex
+	token        string
+	apiKey       string
+	apiSemver    string
+	versionFetch *versionFetch
+}
+
+type versionFetch struct {
+	done chan struct{}
+	err  error
 }
 
 // New builds a client. It returns an error when Addr is not a valid address,
@@ -271,20 +276,38 @@ func (c *Client) send(ctx context.Context, req request) (*http.Response, error) 
 // ensureVersion fetches the API version once and caches it. Concurrent callers
 // wait for the same fetch instead of each hitting /version.
 func (c *Client) ensureVersion(ctx context.Context) error {
-	c.versionMu.Lock()
-	defer c.versionMu.Unlock()
-	if c.APISemver() != "" {
-		return nil
-	}
-	v, err := c.SystemVersionGet(ctx)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if v.APISemver == "" {
-		return errors.New("busybar: device returned an empty API version")
+	c.mu.Lock()
+	if c.apiSemver != "" {
+		c.mu.Unlock()
+		return nil
+	}
+	if fetch := c.versionFetch; fetch != nil {
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-fetch.done:
+			return fetch.err
+		}
+	}
+	fetch := &versionFetch{done: make(chan struct{})}
+	c.versionFetch = fetch
+	c.mu.Unlock()
+
+	v, err := c.SystemVersionGet(ctx)
+	if err == nil && v.APISemver == "" {
+		err = errors.New("busybar: device returned an empty API version")
 	}
 	c.mu.Lock()
-	c.apiSemver = v.APISemver
+	if err == nil {
+		c.apiSemver = v.APISemver
+	}
+	fetch.err = err
+	c.versionFetch = nil
+	close(fetch.done)
 	c.mu.Unlock()
-	return nil
+	return err
 }

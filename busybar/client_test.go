@@ -321,3 +321,74 @@ func TestClientSideValidation(t *testing.T) {
 		t.Fatalf("validation must fail before any request, got %d requests", got)
 	}
 }
+
+func TestVersionWaitHonorsCallerDeadline(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/version" {
+			close(started)
+			<-release
+			w.Write([]byte(`{"api_semver":"1.0.0"}`))
+			return
+		}
+		w.Write([]byte(`{"name":"desk"}`))
+	}))
+	defer srv.Close()
+	c, err := New(Config{Addr: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leader := make(chan error, 1)
+	go func() { _, err := c.SettingsNameGet(context.Background()); leader <- err }()
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	follower := make(chan error, 1)
+	go func() { _, err := c.SettingsNameGet(ctx); follower <- err }()
+	var got error
+	returned := false
+	select {
+	case got = <-follower:
+		returned = true
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+	if err := <-leader; err != nil {
+		t.Fatal(err)
+	}
+	if !returned {
+		got = <-follower
+	}
+	if !returned || !errors.Is(got, context.DeadlineExceeded) {
+		t.Errorf("20ms caller returned before version fetch was released: %v; error: %v", returned, got)
+	}
+}
+
+func TestVersionFetchCanRetryAfterFailure(t *testing.T) {
+	var versions atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/version" {
+			if versions.Add(1) == 1 {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "restarting"})
+			} else {
+				writeJSON(w, http.StatusOK, map[string]string{"api_semver": "25.0.0"})
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"name": "desk"})
+	}))
+	defer srv.Close()
+	c, err := New(Config{Addr: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.SettingsNameGet(context.Background())
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("first fetch: %v", err)
+	}
+	name, err := c.SettingsNameGet(context.Background())
+	if err != nil || name.Name != "desk" || versions.Load() != 2 {
+		t.Fatalf("retry: %+v, %v; fetches %d", name, err, versions.Load())
+	}
+}

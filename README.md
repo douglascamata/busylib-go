@@ -75,6 +75,9 @@ deadline. Use `context.WithTimeout` to override it per call.
 
 The client fetches `/version` once, sends the result as `X-API-Sem-Ver` on
 every request, and refreshes it and retries once when the device answers 405.
+Concurrent calls share an in-flight version fetch. Each waiting caller can
+cancel independently. A failed fetch is shared by its waiters; a later call
+can try again.
 
 ### Display frames
 
