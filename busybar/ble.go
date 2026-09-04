@@ -5,6 +5,24 @@ import (
 	"net/http"
 )
 
+type BleState string
+
+const (
+	BleReset          BleState = "reset"
+	BleInitialization BleState = "initialization"
+	BleDisabled       BleState = "disabled"
+	BleEnabled        BleState = "enabled"
+	BleConnectable    BleState = "connectable"
+	BleConnected      BleState = "connected"
+	BleInternalError  BleState = "internal error"
+)
+
+type BleStatus struct {
+	Status BleState `json:"status"`
+	// Address of the remote device. Only present when connected.
+	Address string `json:"address,omitempty"`
+}
+
 // BleEnable turns Bluetooth on.
 func (c *Client) BleEnable(ctx context.Context) error {
 	return c.do(ctx, request{method: http.MethodPost, path: "/ble/enable"}, nil)

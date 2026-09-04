@@ -6,6 +6,104 @@ import (
 	"net/url"
 )
 
+type UpdateEvent string
+
+const (
+	UpdateEventSessionStart   UpdateEvent = "session_start"
+	UpdateEventSessionStop    UpdateEvent = "session_stop"
+	UpdateEventActionBegin    UpdateEvent = "action_begin"
+	UpdateEventActionDone     UpdateEvent = "action_done"
+	UpdateEventDetailChange   UpdateEvent = "detail_change"
+	UpdateEventActionProgress UpdateEvent = "action_progress"
+	UpdateEventNone           UpdateEvent = "none"
+)
+
+type UpdateAction string
+
+const (
+	UpdateActionDownload        UpdateAction = "download"
+	UpdateActionShaVerification UpdateAction = "sha_verification"
+	UpdateActionUnpack          UpdateAction = "unpack"
+	UpdateActionPrepare         UpdateAction = "prepare"
+	UpdateActionApply           UpdateAction = "apply"
+	UpdateActionNone            UpdateAction = "none"
+)
+
+type UpdateResult string
+
+const (
+	UpdateOK                          UpdateResult = "ok"
+	UpdateBatteryLow                  UpdateResult = "battery_low"
+	UpdateBusy                        UpdateResult = "busy"
+	UpdateDownloadFailure             UpdateResult = "download_failure"
+	UpdateDownloadAbort               UpdateResult = "download_abort"
+	UpdateShaMismatch                 UpdateResult = "sha_mismatch"
+	UpdateUnpackStagingDirFailure     UpdateResult = "unpack_staging_dir_failure"
+	UpdateUnpackArchiveOpenFailure    UpdateResult = "unpack_archive_open_failure"
+	UpdateUnpackArchiveUnpackFailure  UpdateResult = "unpack_archive_unpack_failure"
+	UpdateInstallManifestNotFound     UpdateResult = "install_manifest_not_found"
+	UpdateInstallManifestInvalid      UpdateResult = "install_manifest_invalid"
+	UpdateInstallSessionConfigFailure UpdateResult = "install_session_config_failure"
+	UpdateInstallPointerSetupFailure  UpdateResult = "install_pointer_setup_failure"
+	UpdateUnknownFailure              UpdateResult = "unknown_failure"
+)
+
+type UpdateCheckEvent string
+
+const (
+	CheckEventStart UpdateCheckEvent = "start"
+	CheckEventStop  UpdateCheckEvent = "stop"
+	CheckEventNone  UpdateCheckEvent = "none"
+)
+
+type UpdateCheckResult string
+
+const (
+	CheckAvailable    UpdateCheckResult = "available"
+	CheckNotAvailable UpdateCheckResult = "not_available"
+	CheckFailure      UpdateCheckResult = "failure"
+	CheckNone         UpdateCheckResult = "none"
+)
+
+type UpdateDownloadProgress struct {
+	SpeedBytesPerSec int64 `json:"speed_bytes_per_sec"`
+	ReceivedBytes    int64 `json:"received_bytes"`
+	TotalBytes       int64 `json:"total_bytes"`
+}
+
+type UpdateInstallStatus struct {
+	IsAllowed bool                    `json:"is_allowed"`
+	Event     UpdateEvent             `json:"event"`
+	Action    UpdateAction            `json:"action"`
+	Status    UpdateResult            `json:"status"`
+	Detail    string                  `json:"detail"`
+	Download  *UpdateDownloadProgress `json:"download,omitempty"`
+}
+
+type UpdateCheckStatus struct {
+	AvailableVersion string            `json:"available_version"`
+	Event            UpdateCheckEvent  `json:"event"`
+	Status           UpdateCheckResult `json:"status"`
+}
+
+type UpdateStatus struct {
+	Install *UpdateInstallStatus `json:"install,omitempty"`
+	Check   *UpdateCheckStatus   `json:"check,omitempty"`
+}
+
+type UpdateChangelog struct {
+	Changelog string `json:"changelog"`
+}
+
+// AutoUpdateSettings configures automatic updates. All fields are optional
+// when setting; IsEnabled is a pointer so that false can be sent.
+type AutoUpdateSettings struct {
+	IsEnabled *bool `json:"is_enabled,omitempty"`
+	// IntervalStart and IntervalEnd are HH:MM.
+	IntervalStart string `json:"interval_start,omitempty"`
+	IntervalEnd   string `json:"interval_end,omitempty"`
+}
+
 // UpdateFromFile installs a firmware bundle uploaded by the caller.
 func (c *Client) UpdateFromFile(ctx context.Context, file []byte) error {
 	return c.do(ctx, request{method: http.MethodPost, path: "/update", body: file, contentType: "application/octet-stream"}, nil)

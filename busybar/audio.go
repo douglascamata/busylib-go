@@ -8,6 +8,24 @@ import (
 	"strconv"
 )
 
+// AudioPlayParams plays either an uploaded asset (Path) or a stock sound (StockPath).
+type AudioPlayParams struct {
+	ApplicationName string `json:"application_name"`
+	Path            string `json:"path,omitempty"`
+	StockPath       string `json:"stock_path,omitempty"`
+}
+
+type AudioVolumeInfo struct {
+	Volume int `json:"volume"`
+}
+
+type AudioVolumeParams struct {
+	// Volume is 0-100.
+	Volume int
+	// Silent suppresses the volume-change sound.
+	Silent bool
+}
+
 // AudioPlay plays an uploaded or stock sound.
 func (c *Client) AudioPlay(ctx context.Context, params AudioPlayParams) error {
 	req, err := jsonRequest(http.MethodPost, "/audio/play", params)

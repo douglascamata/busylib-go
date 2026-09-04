@@ -6,6 +6,13 @@ import (
 	"net/url"
 )
 
+type AssetsUploadParams struct {
+	ApplicationName string
+	// File is the file name inside the application's asset directory.
+	File string
+	Data []byte
+}
+
 // AssetsUpload stores a file in the application's asset directory.
 func (c *Client) AssetsUpload(ctx context.Context, params AssetsUploadParams) error {
 	return c.do(ctx, request{

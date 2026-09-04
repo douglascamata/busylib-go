@@ -8,6 +8,29 @@ import (
 	"regexp"
 )
 
+type HTTPAccessMode string
+
+const (
+	HTTPAccessDisabled HTTPAccessMode = "disabled"
+	HTTPAccessEnabled  HTTPAccessMode = "enabled"
+	HTTPAccessKey      HTTPAccessMode = "key"
+)
+
+type HTTPAccessInfo struct {
+	Mode     HTTPAccessMode `json:"mode"`
+	KeyValid bool           `json:"key_valid"`
+}
+
+type HTTPAccessParams struct {
+	Mode HTTPAccessMode
+	// Key is a 4 to 10 digit access password. Required for HTTPAccessKey.
+	Key string
+}
+
+type NameInfo struct {
+	Name string `json:"name"`
+}
+
 var accessKeyRe = regexp.MustCompile(`^\d{4,10}$`)
 
 // SettingsAccessGet returns the HTTP access mode.

@@ -6,6 +6,21 @@ import (
 	"net/url"
 )
 
+type TimestampInfo struct {
+	// Timestamp is ISO 8601 with a timezone, e.g. 2025-10-02T14:30:45+04:00.
+	Timestamp string `json:"timestamp"`
+}
+
+type TimezoneInfo struct {
+	Name   string `json:"name"`
+	Offset string `json:"offset"`
+	Abbr   string `json:"abbr"`
+}
+
+type TimezoneList struct {
+	List []TimezoneInfo `json:"list"`
+}
+
 // TimeGet returns the device time.
 func (c *Client) TimeGet(ctx context.Context) (*TimestampInfo, error) {
 	var out TimestampInfo

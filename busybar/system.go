@@ -6,6 +6,79 @@ import (
 	"net/url"
 )
 
+type VersionInfo struct {
+	APISemver string `json:"api_semver"`
+}
+
+type TransportType string
+
+const (
+	TransportUSB  TransportType = "usb"
+	TransportWifi TransportType = "wifi"
+)
+
+type NetworkInterfaceInfo struct {
+	Type TransportType `json:"type"`
+}
+
+type PowerState string
+
+const (
+	PowerDischarging PowerState = "discharging"
+	PowerCharging    PowerState = "charging"
+	PowerCharged     PowerState = "charged"
+)
+
+type StatusPower struct {
+	State         PowerState `json:"state"`
+	BatteryCharge int        `json:"battery_charge"`
+	// The device reports these in mV and mA. The emulator reports decimals.
+	BatteryVoltage float64 `json:"battery_voltage"`
+	BatteryCurrent float64 `json:"battery_current"`
+	USBVoltage     float64 `json:"usb_voltage"`
+}
+
+type StatusDevice struct {
+	SerialNumber     string `json:"serial_number"`
+	USBMac           string `json:"usb_mac"`
+	WifiMac          string `json:"wifi_mac,omitempty"`
+	BleMac           string `json:"ble_mac,omitempty"`
+	OTPValid         bool   `json:"otp_valid"`
+	OTPModel         string `json:"otp_model,omitempty"`
+	OTPTimestamp     int64  `json:"otp_timestamp,omitempty"`
+	FirmwareSecurity string `json:"firmware_security"`
+}
+
+type StatusFirmware struct {
+	Version         string `json:"version"`
+	Target          any    `json:"target"`
+	Branch          string `json:"branch"`
+	BuildDate       string `json:"build_date"`
+	CommitHash      string `json:"commit_hash"`
+	IntercomVersion string `json:"intercom_version"`
+	NWPVersion      string `json:"nwp_version,omitempty"`
+	MatterVersion   string `json:"matter_version,omitempty"`
+}
+
+type StatusSystem struct {
+	APISemver         string `json:"api_semver"`
+	Uptime            string `json:"uptime"`
+	BootTime          int64  `json:"boot_time"`
+	AutoUpdateEnabled bool   `json:"auto_update_enabled"`
+}
+
+type Status struct {
+	Device   *StatusDevice   `json:"device,omitempty"`
+	Firmware *StatusFirmware `json:"firmware,omitempty"`
+	System   *StatusSystem   `json:"system,omitempty"`
+	Power    *StatusPower    `json:"power,omitempty"`
+}
+
+type LogDumpResponse struct {
+	Result string `json:"result"`
+	Path   string `json:"path"`
+}
+
 // SystemVersionGet returns the API version. This is the only call that does
 // not send the X-API-Sem-Ver header.
 func (c *Client) SystemVersionGet(ctx context.Context) (*VersionInfo, error) {

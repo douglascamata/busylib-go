@@ -6,6 +6,30 @@ import (
 	"net/url"
 )
 
+type StorageEntryType string
+
+const (
+	StorageFile StorageEntryType = "file"
+	StorageDir  StorageEntryType = "dir"
+)
+
+type StorageEntry struct {
+	Type StorageEntryType `json:"type"`
+	Name string           `json:"name"`
+	// Size in bytes. Only set for files.
+	Size int64 `json:"size,omitempty"`
+}
+
+type StorageList struct {
+	List []StorageEntry `json:"list"`
+}
+
+type StorageStatus struct {
+	UsedBytes  int64 `json:"used_bytes"`
+	FreeBytes  int64 `json:"free_bytes"`
+	TotalBytes int64 `json:"total_bytes"`
+}
+
 // StorageWrite creates or overwrites a file.
 func (c *Client) StorageWrite(ctx context.Context, path string, data []byte) error {
 	return c.do(ctx, request{

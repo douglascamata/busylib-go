@@ -12,6 +12,16 @@ import (
 	"github.com/douglascamata/busylib-go/frame"
 )
 
+type DisplayBrightnessInfo struct {
+	// Value is "auto" or "0".."100".
+	Value string `json:"value"`
+}
+
+// Brightness is "auto" or a level from BrightnessLevel.
+type Brightness string
+
+const BrightnessAuto Brightness = "auto"
+
 // DisplayDrawParams is a draw request. Priority is 1-100; 0 means the default of 50.
 type DisplayDrawParams struct {
 	ApplicationName string `json:"application_name"`

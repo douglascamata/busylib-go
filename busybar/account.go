@@ -5,6 +5,45 @@ import (
 	"net/http"
 )
 
+type AccountConnection string
+
+const (
+	AccountConnected    AccountConnection = "connected"
+	AccountDisconnected AccountConnection = "disconnected"
+	AccountError        AccountConnection = "error"
+)
+
+type AccountInfo struct {
+	Linked bool   `json:"linked"`
+	ID     string `json:"id"`
+	Email  string `json:"email"`
+	UserID string `json:"user_id"`
+}
+
+type AccountLink struct {
+	Code      string `json:"code"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+type AccountStatus struct {
+	Status AccountConnection `json:"status"`
+}
+
+type ClientCertType string
+
+const (
+	ClientCertDefault ClientCertType = "default"
+	ClientCertCustom  ClientCertType = "custom"
+	ClientCertNone    ClientCertType = "none"
+)
+
+// AccountBackend is the MQTT backend configuration.
+type AccountBackend struct {
+	ServerURL        string         `json:"server_url"`
+	ClientCertType   ClientCertType `json:"client_cert_type"`
+	IgnoreServerCert bool           `json:"ignore_server_cert"`
+}
+
 // AccountInfoGet returns the linked BUSY account.
 func (c *Client) AccountInfoGet(ctx context.Context) (*AccountInfo, error) {
 	var out AccountInfo
