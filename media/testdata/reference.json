@@ -1,0 +1,102 @@
+[
+  {
+    "Name": "default front",
+    "Width": 200,
+    "Height": 100,
+    "Display": 0,
+    "NoScale": false,
+    "NoCrop": false,
+    "WantWidth": 72,
+    "WantHeight": 16
+  },
+  {
+    "Name": "default back",
+    "Width": 200,
+    "Height": 100,
+    "Display": 1,
+    "NoScale": false,
+    "NoCrop": false,
+    "WantWidth": 160,
+    "WantHeight": 80
+  },
+  {
+    "Name": "small unchanged",
+    "Width": 8,
+    "Height": 8,
+    "Display": 0,
+    "NoScale": false,
+    "NoCrop": false,
+    "WantWidth": 8,
+    "WantHeight": 8
+  },
+  {
+    "Name": "one small dimension",
+    "Width": 200,
+    "Height": 8,
+    "Display": 0,
+    "NoScale": false,
+    "NoCrop": false,
+    "WantWidth": 72,
+    "WantHeight": 16
+  },
+  {
+    "Name": "thin",
+    "Width": 1,
+    "Height": 100,
+    "Display": 0,
+    "NoScale": false,
+    "NoCrop": false,
+    "WantWidth": 72,
+    "WantHeight": 16
+  },
+  {
+    "Name": "scale only",
+    "Width": 200,
+    "Height": 100,
+    "Display": 0,
+    "NoScale": false,
+    "NoCrop": true,
+    "WantWidth": 72,
+    "WantHeight": 36
+  },
+  {
+    "Name": "crop only",
+    "Width": 200,
+    "Height": 100,
+    "Display": 0,
+    "NoScale": true,
+    "NoCrop": false,
+    "WantWidth": 72,
+    "WantHeight": 16
+  },
+  {
+    "Name": "crop cannot fit",
+    "Width": 200,
+    "Height": 8,
+    "Display": 0,
+    "NoScale": true,
+    "NoCrop": false,
+    "WantWidth": 200,
+    "WantHeight": 8
+  },
+  {
+    "Name": "original",
+    "Width": 200,
+    "Height": 100,
+    "Display": 0,
+    "NoScale": true,
+    "NoCrop": true,
+    "WantWidth": 200,
+    "WantHeight": 100
+  },
+  {
+    "Name": "fractional size",
+    "Width": 137,
+    "Height": 51,
+    "Display": 0,
+    "NoScale": false,
+    "NoCrop": true,
+    "WantWidth": 72,
+    "WantHeight": 26
+  }
+]

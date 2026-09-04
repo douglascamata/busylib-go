@@ -3,6 +3,9 @@
 A Go port of [busylib-ts](https://github.com/busy-app/busylib-ts), the library
 for talking to the [BUSY Bar](https://busy.app/).
 
+Some features are also ported from the [busylib-py](https://github.com/busy-app/busylib-py)
+library (for instance, the image and audio converters).
+
 > [!IMPORTANT]
 > **This is an unofficial project.** Built and maintained by
 > [Douglas Camata](https://github.com/douglascamata). This is **not** an official
@@ -13,11 +16,12 @@ for talking to the [BUSY Bar](https://busy.app/).
 > **[busy.app](https://busy.app)** and
 > **[github.com/busy-app](https://github.com/busy-app)**.
 
-Three packages:
+Four packages:
 
 - **`busybar`**: a typed client for the BUSY Bar [HTTP API](https://docs.busy.app/bar/dev/http-api).
 - **`statestream`**: real-time device state over WebSocket, decoded from protobuf.
 - **`frame`**: pixel-format helpers for display frames (BGR, L4, L8, RLE, deflate) and an `image.RGBA` bridge.
+- **`media`**: image resizing and PNG encoding, plus audio conversion through FFmpeg.
 
 ```bash
 go get github.com/douglascamata/busylib-go
@@ -89,6 +93,112 @@ rgba, err := bar.DisplayScreenFrameGet(ctx, frame.Front, busybar.FrameRGBA)
 w, h := frame.Dimensions(frame.Front)
 png.Encode(file, frame.ToImage(rgba, w, h))
 ```
+
+## Image and audio conversion
+
+Import `github.com/douglascamata/busylib-go/media`. Each converter takes file
+bytes (for example, from `os.ReadFile`) and returns an `Asset` with `Name` and
+`Data`. Use that name both for upload and for display or playback.
+`AssetsUpload` and `StorageWrite` send bytes unchanged; conversion is explicit.
+
+### Images
+
+`ConvertImage` follows busylib-py's image recipe. It reads PNG, JPEG, BMP,
+TIFF, WebP and static GIF and produces PNG. The zero-value `ImageOptions`
+selects the front display (72 × 16), with scaling and center cropping enabled.
+Use `Display: frame.Back` for the back display (160 × 80).
+
+When either source dimension exceeds the display, it scales with Lanczos
+using the larger width/height ratio. This covers the display before cropping.
+The center crop runs only when both resulting dimensions fit the target.
+Small images stay small; an image with only one small dimension can grow.
+`NoScale` and `NoCrop` disable these steps independently.
+
+Animation is rejected. EXIF orientation and color-profile processing are not
+applied. PNG encoding and pixel rounding can differ from Pillow, but the sizing
+rules match Python. Image conversion does not require FFmpeg.
+
+```go
+asset, err := media.ConvertImage(
+	"photo.jpg", 
+	imageBytes, 
+	media.ImageOptions{Display: frame.Back},
+)
+if err != nil {
+    log.Fatal(err)
+}
+if err := bar.AssetsUpload(ctx, busybar.AssetsUploadParams{
+    ApplicationName: "demo", File: asset.Name, Data: asset.Data,
+}); err != nil {
+    log.Fatal(err)
+}
+if err := bar.DisplayDraw(ctx, busybar.DisplayDrawParams{
+    ApplicationName: "demo",
+    Elements: []busybar.Element{
+        busybar.ImageElement{
+            ElementBase: busybar.ElementBase{ID: "photo", Display: busybar.DisplayBack},
+            Path:        asset.Name,
+        },
+    },
+}); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Audio
+
+**Install FFmpeg and make sure `ffmpeg` is on `PATH`.** The
+[ffmpeg-go](https://github.com/u2takey/ffmpeg-go) wrapper does not install it.
+For example, use `brew install ffmpeg` on macOS or `sudo apt install ffmpeg`
+on Debian/Ubuntu. Check the installation with `ffmpeg -version`.
+
+`ConvertAudio` uses FFmpeg's default audio stream selection, mixes to mono, and resamples
+it to 44.1 kHz. Supported inputs depend on your FFmpeg build; the tests cover
+WAV, MP3, OGG, AAC, M4A and FLAC. The context cancels conversion. Temporary
+input files are removed when the call returns.
+
+The result is **raw signed 16-bit little-endian PCM with a `.wav` name**,
+matching [busylib-py](https://github.com/busy-app/busylib-py/blob/main/src/busylib/converter/audio.py).
+Despite that extension, there is no WAV header. Volume is not normalized.
+Direct `ConvertAudio` calls with `.raw` or `.pcm` input keep the bytes unchanged
+and change the extension to `.wav`, without running FFmpeg. Such input must
+already use the device's PCM format.
+
+```go
+asset, err := media.ConvertAudio(ctx, "alert.mp3", audioBytes)
+if err != nil {
+    log.Fatal(err)
+}
+if err := bar.AssetsUpload(ctx, busybar.AssetsUploadParams{
+    ApplicationName: "demo", File: asset.Name, Data: asset.Data,
+}); err != nil {
+    log.Fatal(err)
+}
+if err := bar.AudioPlay(ctx, busybar.AudioPlayParams{
+    ApplicationName: "demo", Path: asset.Name,
+}); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Select a converter by file extension
+
+```go
+media.ConvertForStorage(ctx, filename, data)
+```
+
+The snippet follows Python's dispatcher:
+
+- JPG, JPEG, PNG, BMP, TIF, TIFF and WebP use default image options.
+- MP3, OGG, AAC, M4A, FLAC and WAV use the audio converter.
+- GIF, MOV, MP4, MKV, AVI and WebM return `media.ErrUnsupported`.
+- Unknown extensions, including RAW and PCM, keep their name and bytes.
+
+Extension matching ignores case. Known formats return an error if conversion
+fails. To convert a static GIF or select the back display, call `ConvertImage`
+directly. Use `errors.Is(err, media.ErrUnsupported)` to identify unsupported
+conversions. Image and audio decoders can return other errors for unsupported
+encodings within those file formats.
 
 ## StateStream
 
@@ -173,7 +283,23 @@ script clones the revision in `scripts/emulator-revision` into `.cache/` on
 first run. Set `BUSYBAR_EMULATOR_DIR` to reuse a clean checkout of that revision.
 Existing checkouts are never reset by the script.
 
-CI runs the unit tests, lint checks, and pinned emulator smoke tests.
+CI installs FFmpeg and runs the unit tests, lint checks, and pinned emulator
+smoke tests. Locally, tests that execute FFmpeg skip when it is not installed.
+Run `go test -race -v ./media` with FFmpeg installed to check the converted
+PNG pixels and PCM samples, including all six audio input formats above. Python/Pillow image references
+can be regenerated with `python3 media/testdata/generate.py` (requires Pillow).
+
+For an upstream review, use the `review-upstream` skill or run the script directly
+with Python 3 and Git:
+
+```bash
+python3 scripts/review-upstream.py ts --from REVIEWED_SHA --to TARGET_REF --output .cache/upstream-review/ts.md
+```
+
+Replace the placeholders with a previously reviewed commit and the target commit,
+branch, or tag. Sources are `ts`, `protobuf`, and `firmware`. The report includes
+resolved revisions, source links, all changed files, and a focused diff. This is
+an on-demand review aid; it does not certify compatibility or update any pins.
 
 ## License
 
