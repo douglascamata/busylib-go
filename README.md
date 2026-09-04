@@ -129,6 +129,12 @@ returns `CodeReconnectFailed` when it gives up. `Status().Data` flips to
 It is `DataNone` while reconnecting. Callbacks run one at a time on the `Run`
 goroutine. Cancellation can race with a callback that is about to start. No
 callback fires after `Run` returns.
+Token and subscription commands are sent in order. Callbacks can call these
+methods. Each remote connection must authenticate within `ConnectTimeout`,
+including connections opened after a drop.
+
+Stream errors keep their underlying cause. Use `errors.Is` or `errors.As`
+to inspect transport, token-provider, and decoding errors.
 
 Each `Update` embeds the decoded protobuf message, so `u.GetPower()`,
 `u.GetWifi()` and friends are available. The `statestream.BatteryStatus`,
@@ -147,6 +153,8 @@ values the HTTP API uses.
 - `StateStream.Run` blocks. The caller owns its goroutine and cancellation.
 - `Status().Data` is `DataNone` while reconnecting. busylib-ts keeps its
   data timer across reconnects and reports `STALE` instead.
+- Remote authentication has a deadline on every connection. The TypeScript
+  connection timer applies to startup.
 
 ## Development
 

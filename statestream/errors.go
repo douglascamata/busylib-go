@@ -20,11 +20,15 @@ const (
 type Error struct {
 	Code    ErrorCode
 	Message string
+	// Cause is the underlying transport, token-provider, or decoding error.
+	Cause error
 	// Data carries context for some codes: the protobuf error for
 	// CodeDeviceError, the raw message for CodeDecodeError.
 	Data any
 }
 
 func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
+
+func (e *Error) Unwrap() error { return e.Cause }
 
 func newError(code ErrorCode, msg string) *Error { return &Error{Code: code, Message: msg} }

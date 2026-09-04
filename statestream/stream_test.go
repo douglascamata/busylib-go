@@ -673,3 +673,160 @@ func TestRemoteFailsWithoutTokenProvider(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 }
+
+func TestTokenUpdateDuringOpenKeepsNewestToken(t *testing.T) {
+	messages := make(chan string, 2)
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		defer conn.CloseNow()
+		for range 2 {
+			_, b, err := conn.Read(context.Background())
+			if err != nil {
+				return
+			}
+			messages <- string(b)
+		}
+		conn.Read(context.Background())
+	})
+	s, err := NewRemote(Options{Addr: srv.URL, Token: "old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	cancel, done := runAsync(s, Callbacks{Status: func(st Status) {
+		if st.Auth == Authenticating && !changed {
+			changed = true
+			if err := s.SetToken(context.Background(), "new"); err != nil {
+				t.Error(err)
+			}
+		}
+	}})
+	first := recv(t, messages, "first token")
+	last := recv(t, messages, "last token")
+	cancelAndWait(t, cancel, done)
+	if last != `{"token":"new"}` {
+		t.Errorf("server received %s then %s; last token must be new", first, last)
+	}
+}
+
+func TestUnsubscribeDuringOpenIsNotRestored(t *testing.T) {
+	messages := make(chan string, 3)
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		defer conn.CloseNow()
+		for range 3 {
+			_, b, err := conn.Read(context.Background())
+			if err != nil {
+				return
+			}
+			messages <- string(b)
+		}
+		conn.Read(context.Background())
+	})
+	s, err := NewRemote(Options{Addr: srv.URL, Token: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Subscribe(context.Background(), "g1"); err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	cancel, done := runAsync(s, Callbacks{Status: func(st Status) {
+		if st.Auth == Authenticating && !changed {
+			changed = true
+			if err := s.Unsubscribe(context.Background(), "g1"); err != nil {
+				t.Error(err)
+			}
+		}
+	}})
+	defer cancelAndWait(t, cancel, done)
+	first := recv(t, messages, "token")
+	recv(t, messages, "subscription")
+	last := recv(t, messages, "unsubscribe")
+	if first != `{"token":"token"}` || last != `{"unsubscribe":["g1"]}` {
+		t.Errorf("first command %s, last command %s; want token then unsubscribe", first, last)
+	}
+}
+
+func TestReconnectAuthenticationTimeout(t *testing.T) {
+	wire := inputState(t)
+	srv := newWSServer(t, func(conn *websocket.Conn, n int32) {
+		defer conn.CloseNow()
+		conn.Read(context.Background())
+		if n == 1 {
+			conn.Write(context.Background(), websocket.MessageText,
+				[]byte(`{"state":"`+base64.StdEncoding.EncodeToString(wire)+`"}`))
+			conn.Close(websocket.StatusInternalError, "reconnect")
+			return
+		}
+		conn.Read(context.Background())
+	})
+	s, err := NewRemote(Options{Addr: srv.URL, Token: "token",
+		ConnectTimeout: 50 * time.Millisecond, ReconnectDelay: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
+	defer cancel()
+	err = s.Run(ctx, Callbacks{})
+	var streamErr *Error
+	if !errors.As(err, &streamErr) || streamErr.Code != CodeConnectionTimeout {
+		t.Errorf("silent second connection returned %v after %d connections; want authentication timeout", err, srv.accepts.Load())
+	}
+}
+
+func TestDialPreservesCause(t *testing.T) {
+	cause := errors.New("transport unavailable")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, cause
+	})}
+	s, _ := NewLocal(Options{Addr: "ws://example.invalid", HTTPClient: client})
+	reported := make(chan *Error, 1)
+	err := s.Run(context.Background(), Callbacks{Error: func(e *Error) { reported <- e }})
+	if !errors.Is(err, cause) || !errors.Is(<-reported, cause) {
+		t.Fatalf("dial cause lost: %v", err)
+	}
+}
+
+func TestTokenProviderPreservesCause(t *testing.T) {
+	cause := errors.New("refresh unavailable")
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		conn.Read(context.Background())
+		conn.Close(authCloseCode, "expired")
+	})
+	s, _ := NewRemote(Options{Addr: srv.URL, Token: "old", TokenProvider: func(context.Context) (string, error) {
+		return "", cause
+	}})
+	err := s.Run(context.Background(), Callbacks{})
+	if !errors.Is(err, cause) {
+		t.Fatalf("token provider cause lost: %v", err)
+	}
+}
+
+func TestServerClosePreservesCause(t *testing.T) {
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		conn.Read(context.Background())
+		conn.Close(websocket.StatusNormalClosure, "maintenance")
+	})
+	s, _ := NewLocal(Options{Addr: srv.URL})
+	err := s.Run(context.Background(), Callbacks{})
+	var closeErr websocket.CloseError
+	if !errors.As(err, &closeErr) || closeErr.Reason != "maintenance" {
+		t.Fatalf("server close cause lost: %v", err)
+	}
+}
+
+func TestRefreshErrorWinsOverCallbackCancellation(t *testing.T) {
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		conn.Read(context.Background())
+		conn.Close(authCloseCode, "expired")
+	})
+	s, _ := NewRemote(Options{Addr: srv.URL, Token: "old", TokenProvider: func(context.Context) (string, error) {
+		return "", context.Canceled
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := s.Run(ctx, Callbacks{Error: func(*Error) { cancel() }})
+	var streamErr *Error
+	if !errors.As(err, &streamErr) || streamErr.Code != CodeAuthRefreshFailed {
+		t.Fatalf("terminal refresh error lost after callback cancellation: %v", err)
+	}
+}

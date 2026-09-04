@@ -49,6 +49,8 @@ type Options struct {
 	// one (close code 3000). Remote only.
 	TokenProvider func(context.Context) (string, error)
 
+	// ConnectTimeout bounds each dial and each remote authentication handshake,
+	// including handshakes after reconnecting.
 	ConnectTimeout time.Duration
 	DataTimeout    time.Duration
 	ReconnectDelay time.Duration
@@ -99,9 +101,13 @@ type Stream struct {
 	mu      sync.Mutex
 	running bool
 	status  Status
-	token   string
-	conn    *websocket.Conn
-	subs    map[string]struct{}
+
+	// commandMu orders token/subscription changes, connection publication, and writes.
+	// No user callback runs while it is held.
+	commandMu sync.Mutex
+	token     string
+	conn      *websocket.Conn
+	subs      map[string]struct{}
 }
 
 // NewLocal creates a stream to a device on the local network.
@@ -201,7 +207,9 @@ func (s *Stream) Run(ctx context.Context, cb Callbacks) error {
 	}
 	err := s.run(ctx, em)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		if err != nil && !errors.Is(err, ctxErr) {
+		// run returns ctx.Err() directly for cancellation. A stream error may
+		// wrap the same cause, but an already reported failure takes precedence.
+		if err != nil && err != ctxErr {
 			return err
 		}
 		em.report(func(st *Status) {
@@ -236,17 +244,13 @@ func (s *Stream) run(ctx context.Context, em *emitter) error {
 			}
 			continue
 		}
-		s.mu.Lock()
-		s.conn = conn
-		s.mu.Unlock()
-
 		connectedOnce = true
 		retries = 0
 		s.onOpen(ctx, em, conn)
-		res := s.serve(ctx, em, conn, s.remote && !em.ready)
-		s.mu.Lock()
+		res := s.serve(ctx, em, conn)
+		s.commandMu.Lock()
 		s.conn = nil
-		s.mu.Unlock()
+		s.commandMu.Unlock()
 		if res.fatal != nil {
 			return res.fatal
 		}
@@ -257,8 +261,9 @@ func (s *Stream) run(ctx context.Context, em *emitter) error {
 			authRetries = 0
 		}
 
+		closeCode := websocket.CloseStatus(res.err)
 		switch {
-		case s.remote && res.closeCode == authCloseCode:
+		case s.remote && closeCode == authCloseCode:
 			authRetries++
 			if authRetries > s.opts.MaxAuthAttempts {
 				e := newError(CodeAuthFailed, fmt.Sprintf("maximum authentication attempts (%d) reached", s.opts.MaxAuthAttempts))
@@ -282,15 +287,15 @@ func (s *Stream) run(ctx context.Context, em *emitter) error {
 				return ctxErr
 			}
 			if err != nil {
-				e := newError(CodeAuthRefreshFailed, "failed to refresh token: "+err.Error())
+				e := &Error{Code: CodeAuthRefreshFailed, Message: "failed to refresh token: " + err.Error(), Cause: err}
 				em.fail(ctx, e)
 				return e
 			}
-			s.mu.Lock()
+			s.commandMu.Lock()
 			s.token = token
-			s.mu.Unlock()
-		case res.closeCode == websocket.StatusNormalClosure:
-			e := newError(CodeConnectionLost, "stream closed by the server")
+			s.commandMu.Unlock()
+		case closeCode == websocket.StatusNormalClosure:
+			e := &Error{Code: CodeConnectionLost, Message: "stream closed by the server", Cause: res.err}
 			em.fail(ctx, e)
 			return e
 		default:
@@ -317,21 +322,22 @@ func (s *Stream) begin() error {
 // finish releases the Run. run clears the connection itself; the close here
 // only matters when a callback panic unwinds past that point.
 func (s *Stream) finish() {
+	s.commandMu.Lock()
+	if s.conn != nil {
+		_ = s.conn.CloseNow()
+		s.conn = nil
+	}
+	s.commandMu.Unlock()
 	s.mu.Lock()
-	conn := s.conn
-	s.conn = nil
 	s.running = false
 	s.mu.Unlock()
-	if conn != nil {
-		_ = conn.CloseNow()
-	}
 }
 
 func (s *Stream) dialError(err error) *Error {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return newError(CodeConnectionTimeout, fmt.Sprintf("connection timed out after %s", s.opts.ConnectTimeout))
+		return &Error{Code: CodeConnectionTimeout, Message: fmt.Sprintf("connection timed out after %s", s.opts.ConnectTimeout), Cause: err}
 	}
-	return newError(CodeConnectionFailed, "websocket connection error: "+err.Error())
+	return &Error{Code: CodeConnectionFailed, Message: "websocket connection error: " + err.Error(), Cause: err}
 }
 
 // waitToReconnect reports attempt and sleeps for the reconnect delay. It
@@ -359,11 +365,11 @@ func (s *Stream) waitToReconnect(ctx context.Context, em *emitter, attempt int) 
 
 // SetToken replaces the remote token. When connected, it sends the token at once.
 func (s *Stream) SetToken(ctx context.Context, token string) error {
-	s.mu.Lock()
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
 	changed := s.token != token
 	s.token = token
 	conn := s.conn
-	s.mu.Unlock()
 	if !s.remote || conn == nil || !changed {
 		return nil
 	}
@@ -373,11 +379,11 @@ func (s *Stream) SetToken(ctx context.Context, token string) error {
 // Subscribe asks the cloud for updates of one device. Subscriptions survive
 // reconnects. Remote only.
 func (s *Stream) Subscribe(ctx context.Context, guid string) error {
-	s.mu.Lock()
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
 	_, had := s.subs[guid]
 	s.subs[guid] = struct{}{}
 	conn := s.conn
-	s.mu.Unlock()
 	if had || conn == nil || !s.remote {
 		return nil
 	}
@@ -386,11 +392,11 @@ func (s *Stream) Subscribe(ctx context.Context, guid string) error {
 
 // Unsubscribe stops updates of one device. Remote only.
 func (s *Stream) Unsubscribe(ctx context.Context, guid string) error {
-	s.mu.Lock()
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
 	_, had := s.subs[guid]
 	delete(s.subs, guid)
 	conn := s.conn
-	s.mu.Unlock()
 	if !had || conn == nil || !s.remote {
 		return nil
 	}
@@ -409,25 +415,30 @@ func (s *Stream) dial(ctx context.Context) (*websocket.Conn, error) {
 }
 
 func (s *Stream) onOpen(ctx context.Context, em *emitter, conn *websocket.Conn) {
-	em.patch(ctx, func(st *Status) { st.Connection = Connected; st.ConnectionAttempts = 0 })
+	s.commandMu.Lock()
+	s.conn = conn
+	hasToken := s.token != ""
 	if !s.remote {
 		_ = writeJSON(ctx, conn, map[string]bool{"enable": true})
+	} else {
+		if hasToken {
+			_ = writeJSON(ctx, conn, map[string]string{"token": s.token})
+		}
+		if len(s.subs) > 0 {
+			subs := make([]string, 0, len(s.subs))
+			for guid := range s.subs {
+				subs = append(subs, guid)
+			}
+			_ = writeJSON(ctx, conn, map[string][]string{"subscribe": subs})
+		}
+	}
+	s.commandMu.Unlock()
+
+	em.patch(ctx, func(st *Status) { st.Connection = Connected; st.ConnectionAttempts = 0 })
+	if !s.remote {
 		em.running(ctx, func(st *Status) { st.Auth = Authenticated })
-		return
-	}
-	s.mu.Lock()
-	token := s.token
-	subs := make([]string, 0, len(s.subs))
-	for guid := range s.subs {
-		subs = append(subs, guid)
-	}
-	s.mu.Unlock()
-	if token != "" {
+	} else if hasToken {
 		em.patch(ctx, func(st *Status) { st.Auth = Authenticating })
-		_ = writeJSON(ctx, conn, map[string]string{"token": token})
-	}
-	if len(subs) > 0 {
-		_ = writeJSON(ctx, conn, map[string][]string{"subscribe": subs})
 	}
 }
 
@@ -437,11 +448,10 @@ type readResult struct {
 	err  error
 }
 
-// connResult describes how one connection ended. closeCode is meaningful only
-// when the connection ended with a read error; the other endings are decided
-// before the code is consulted.
+// connResult describes how one connection ended. err preserves the read error,
+// including the server close code and reason.
 type connResult struct {
-	closeCode     websocket.StatusCode
+	err           error
 	fatal         *Error
 	authenticated bool
 }
@@ -449,7 +459,7 @@ type connResult struct {
 // serve delivers one connection's messages until it ends. The reader
 // goroutine only performs WebSocket reads and hands the results over here,
 // so every callback and timer runs on the Run goroutine.
-func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn, waitForAuth bool) connResult {
+func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn) connResult {
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 	reads := make(chan readResult, 1)
@@ -461,7 +471,7 @@ func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn, w
 	defer dataTimer.Stop()
 
 	var authC <-chan time.Time
-	if waitForAuth {
+	if s.remote {
 		authTimer := time.NewTimer(s.opts.ConnectTimeout)
 		defer authTimer.Stop()
 		authC = authTimer.C
@@ -475,7 +485,7 @@ func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn, w
 			return connResult{authenticated: authenticated}
 		case r := <-reads:
 			if r.err != nil {
-				return connResult{closeCode: websocket.CloseStatus(r.err), authenticated: authenticated}
+				return connResult{err: r.err, authenticated: authenticated}
 			}
 			dataTimer.Reset(s.opts.DataTimeout)
 			s.touchData(ctx, em)
@@ -496,7 +506,7 @@ func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn, w
 				}
 			})
 		case <-authC:
-			e := newError(CodeConnectionTimeout, fmt.Sprintf("connection timed out after %s", s.opts.ConnectTimeout))
+			e := &Error{Code: CodeConnectionTimeout, Message: fmt.Sprintf("connection timed out after %s", s.opts.ConnectTimeout), Cause: context.DeadlineExceeded}
 			em.fail(ctx, e)
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return connResult{fatal: e, authenticated: authenticated}
@@ -531,7 +541,7 @@ func (s *Stream) handleMessage(ctx context.Context, em *emitter, typ websocket.M
 			Device  RemoteDevice    `json:"device"`
 		}
 		if err := json.Unmarshal(data, &env); err != nil {
-			em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+			em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Cause: err, Data: data})
 			return nil, false
 		}
 		if strings.HasPrefix(env.Type, "device.") {
@@ -544,7 +554,7 @@ func (s *Stream) handleMessage(ctx context.Context, em *emitter, typ websocket.M
 		}
 		var err error
 		if payload, err = decodeEnvelopeState(env.State); err != nil {
-			em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+			em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Cause: err, Data: data})
 			return nil, false
 		}
 		if !authReported {
@@ -557,7 +567,7 @@ func (s *Stream) handleMessage(ctx context.Context, em *emitter, typ websocket.M
 	}
 	var raw pb.State
 	if err := proto.Unmarshal(payload, &raw); err != nil {
-		em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+		em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Cause: err, Data: data})
 		return nil, authenticated
 	}
 	if raw.Error != nil {
@@ -588,7 +598,7 @@ func (s *Stream) handleMessage(ctx context.Context, em *emitter, typ websocket.M
 		}
 	}
 	state := processState(&raw, barID, func(err error) {
-		em.error(ctx, &Error{Code: CodeFrameProcessError, Message: err.Error()})
+		em.error(ctx, &Error{Code: CodeFrameProcessError, Message: err.Error(), Cause: err})
 	})
 	em.data(ctx, state)
 	return nil, authenticated
