@@ -122,10 +122,10 @@ starts a goroutine when it needs other work to continue. `Ready` fires once
 per `Run` when the stream is connected (and, for remote streams,
 authenticated). `Run` reconnects on its own, up to `MaxReconnectAttempts`. It
 returns `CodeReconnectFailed` when it gives up. `Status().Data` flips to
-`DataStale` when no message arrives for `DataTimeout`, even across a
-reconnect. Callbacks run one at a time on the `Run` goroutine, and a callback
-may cancel the context; after that only a final `Status` with `Main ==
-Stopped` is reported.
+`DataStale` when an open connection stops sending messages for `DataTimeout`.
+It is `DataNone` while reconnecting. Callbacks run one at a time on the `Run`
+goroutine. Cancellation can race with a callback that is about to start. No
+callback fires after `Run` returns.
 
 Each `Update` embeds the decoded protobuf message, so `u.GetPower()`,
 `u.GetWifi()` and friends are available. The `statestream.BatteryStatus`,
@@ -142,6 +142,8 @@ values the HTTP API uses.
 - `ScreenRenderer` (WebGL) has no Go counterpart. `frame.ToImage` gives you an
   `image.RGBA` to render however you like.
 - `StateStream.Run` blocks. The caller owns its goroutine and cancellation.
+- `Status().Data` is `DataNone` while reconnecting. busylib-ts keeps its
+  data timer across reconnects and reports `STALE` instead.
 
 ## Development
 

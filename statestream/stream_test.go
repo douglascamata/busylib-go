@@ -368,7 +368,7 @@ func TestReadyFiresOncePerRunNotPerReconnect(t *testing.T) {
 	}
 }
 
-func TestDataGoesStaleAcrossReconnect(t *testing.T) {
+func TestDataClearsWhileReconnecting(t *testing.T) {
 	srv := newWSServer(t, func(conn *websocket.Conn, n int32) {
 		ctx := context.Background()
 		conn.Read(ctx)
@@ -377,17 +377,14 @@ func TestDataGoesStaleAcrossReconnect(t *testing.T) {
 			conn.Close(websocket.StatusInternalError, "boom")
 			return
 		}
-		// The second connection never sends anything.
 		conn.Read(ctx)
 	})
-	s, _ := NewLocal(Options{Addr: srv.URL, DataTimeout: 50 * time.Millisecond, ReconnectDelay: 10 * time.Millisecond})
-	cancel, done := runAsync(s, Callbacks{})
+	s, _ := NewLocal(Options{Addr: srv.URL, ReconnectDelay: 200 * time.Millisecond})
+	data := make(chan struct{}, 1)
+	cancel, done := runAsync(s, Callbacks{Data: func(*State) { data <- struct{}{} }})
 	defer cancelAndWait(t, cancel, done)
-	waitStatus(t, s, func(st Status) bool { return st.Data == DataActive })
-	st := waitStatus(t, s, func(st Status) bool { return st.Data == DataStale })
-	if st.Connection != Connected || srv.accepts.Load() != 2 {
-		t.Fatalf("stale must be reported on the reconnected socket: %+v, accepts %d", st, srv.accepts.Load())
-	}
+	recv(t, data, "data from the first connection")
+	waitStatus(t, s, func(st Status) bool { return st.Connection == Reconnecting && st.Data == DataNone })
 }
 
 func TestDialTimeoutReportsConnectionTimeout(t *testing.T) {
@@ -489,18 +486,45 @@ func TestCallbackCanCancelRun(t *testing.T) {
 	s, _ := NewLocal(Options{Addr: srv.URL})
 	ctx, cancel := context.WithCancel(context.Background())
 	callbackDone := make(chan struct{})
+	var dataCalled atomic.Bool
 	done := make(chan error, 1)
 	go func() {
-		done <- s.Run(ctx, Callbacks{Data: func(*State) {
-			cancel()
-			close(callbackDone)
-		}})
+		done <- s.Run(ctx, Callbacks{
+			RawData: func([]byte) {
+				cancel()
+				close(callbackDone)
+			},
+			Data: func(*State) { dataCalled.Store(true) },
+		})
 	}()
 	recv(t, callbackDone, "callback to cancel Run")
 	if err := recv(t, done, "Run to stop"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v", err)
 	}
 	if st := s.Status(); st.Main != Stopped || st.Connection != Disconnected {
+		t.Fatalf("status %+v", st)
+	}
+	if dataCalled.Load() {
+		t.Fatal("Data fired after RawData cancelled Run")
+	}
+}
+
+func TestTerminalErrorWinsOverCallbackCancellation(t *testing.T) {
+	srv := newWSServer(t, func(conn *websocket.Conn, _ int32) {
+		ctx := context.Background()
+		conn.Read(ctx)
+		b, _ := proto.Marshal(&pb.State{Error: &pb.Error{Cause: pb.Cause_RESOURCE_LIMIT, Severity: pb.Severity_FATAL}})
+		conn.Write(ctx, websocket.MessageBinary, b)
+		conn.Read(ctx)
+	})
+	s, _ := NewLocal(Options{Addr: srv.URL})
+	ctx, cancel := context.WithCancel(context.Background())
+	err := s.Run(ctx, Callbacks{Error: func(*Error) { cancel() }})
+	var streamErr *Error
+	if !errors.As(err, &streamErr) || streamErr.Code != CodeDeviceError {
+		t.Fatalf("Run returned %v", err)
+	}
+	if st := s.Status(); st.Main != Failed || st.Connection != Disconnected || st.Data != DataNone {
 		t.Fatalf("status %+v", st)
 	}
 }

@@ -62,9 +62,9 @@ type Options struct {
 }
 
 // Callbacks receive stream events. Every field is optional. Run invokes them
-// serially in its goroutine, so they must return promptly. A callback may
-// cancel Run's context. After that no callback fires, except one final Status
-// with Main == Stopped.
+// serially in its goroutine, so they must return promptly. Run checks its
+// context between callbacks. External cancellation can race with a callback
+// that is about to start. No callback fires after Run returns.
 type Callbacks struct {
 	// Ready is called once per Run when the stream is running: for a local
 	// stream when the socket is open, for a remote stream after the first
@@ -184,24 +184,31 @@ func (s *Stream) Status() Status {
 // Callbacks.Ready once the stream is running: a local stream when the socket
 // opens, a remote stream after its first authenticated state message. Run
 // reconnects until the context is cancelled, a fatal error occurs, or a retry
-// budget is used up. It returns ctx.Err() after cancellation. Only one call
-// can run at a time; a second one returns CodeStreamAlreadyStarted.
+// budget is used up. It returns ctx.Err() when cancellation stops it. An error
+// already produced by the stream takes precedence. Only one call can run at a
+// time; a second one returns CodeStreamAlreadyStarted.
 func (s *Stream) Run(ctx context.Context, cb Callbacks) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.begin(); err != nil {
 		return err
 	}
 	defer s.finish()
-	em := &emitter{s: s, ctx: ctx, cb: cb}
+	em := &emitter{s: s, cb: cb}
 	if cb.Status != nil {
 		cb.Status(s.Status())
 	}
 	err := s.run(ctx, em)
-	if ctx.Err() != nil {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if err != nil && !errors.Is(err, ctxErr) {
+			return err
+		}
 		em.report(func(st *Status) {
 			st.Main, st.Connection, st.Auth, st.Data = Stopped, Disconnected, Unauthenticated, DataNone
 			st.ConnectionAttempts, st.AuthAttempts = 0, 0
 		})
-		return ctx.Err()
+		return ctxErr
 	}
 	return err
 }
@@ -209,23 +216,17 @@ func (s *Stream) Run(ctx context.Context, cb Callbacks) error {
 // run is the connect and reconnect loop. It returns whatever ended the loop;
 // Run turns a cancellation into ctx.Err() and reports the Stopped status.
 func (s *Stream) run(ctx context.Context, em *emitter) error {
-	// The stale timer outlives a single connection, so data that stops flowing
-	// across a reconnect still turns stale. It is armed by the first message.
-	dataTimer := time.NewTimer(s.opts.DataTimeout)
-	dataTimer.Stop()
-	defer dataTimer.Stop()
-
 	connectedOnce := false
 	retries, authRetries := 0, 0
 	for {
-		em.patch(func(st *Status) { st.Connection = Connecting })
+		em.patch(ctx, func(st *Status) { st.Connection = Connecting })
 		conn, dialErr := s.dial(ctx)
 		if dialErr != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			e := s.dialError(dialErr)
-			em.fail(e)
+			em.fail(ctx, e)
 			if !connectedOnce {
 				return e
 			}
@@ -242,15 +243,15 @@ func (s *Stream) run(ctx context.Context, em *emitter) error {
 		connectedOnce = true
 		retries = 0
 		s.onOpen(ctx, em, conn)
-		res := s.serve(ctx, em, conn, dataTimer, s.remote && !em.ready)
+		res := s.serve(ctx, em, conn, s.remote && !em.ready)
 		s.mu.Lock()
 		s.conn = nil
 		s.mu.Unlock()
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		if res.fatal != nil {
 			return res.fatal
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		if res.authenticated {
 			authRetries = 0
@@ -261,19 +262,28 @@ func (s *Stream) run(ctx context.Context, em *emitter) error {
 			authRetries++
 			if authRetries > s.opts.MaxAuthAttempts {
 				e := newError(CodeAuthFailed, fmt.Sprintf("maximum authentication attempts (%d) reached", s.opts.MaxAuthAttempts))
-				em.fail(e)
+				em.fail(ctx, e)
 				return e
 			}
-			em.patch(func(st *Status) { st.Auth = Reauthenticating; st.AuthAttempts = authRetries })
+			em.patch(ctx, func(st *Status) {
+				st.Connection, st.Auth, st.Data = Reconnecting, Reauthenticating, DataNone
+				st.AuthAttempts = authRetries
+			})
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if s.opts.TokenProvider == nil {
 				e := newError(CodeAuthFailed, "token rejected and no TokenProvider configured")
-				em.fail(e)
+				em.fail(ctx, e)
 				return e
 			}
 			token, err := s.opts.TokenProvider(ctx)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			if err != nil {
 				e := newError(CodeAuthRefreshFailed, "failed to refresh token: "+err.Error())
-				em.fail(e)
+				em.fail(ctx, e)
 				return e
 			}
 			s.mu.Lock()
@@ -281,7 +291,7 @@ func (s *Stream) run(ctx context.Context, em *emitter) error {
 			s.mu.Unlock()
 		case res.closeCode == websocket.StatusNormalClosure:
 			e := newError(CodeConnectionLost, "stream closed by the server")
-			em.fail(e)
+			em.fail(ctx, e)
 			return e
 		default:
 			retries++
@@ -304,6 +314,8 @@ func (s *Stream) begin() error {
 	return nil
 }
 
+// finish releases the Run. run clears the connection itself; the close here
+// only matters when a callback panic unwinds past that point.
 func (s *Stream) finish() {
 	s.mu.Lock()
 	conn := s.conn
@@ -325,17 +337,24 @@ func (s *Stream) dialError(err error) *Error {
 // waitToReconnect reports attempt and sleeps for the reconnect delay. It
 // returns CodeReconnectFailed when the budget is used up.
 func (s *Stream) waitToReconnect(ctx context.Context, em *emitter, attempt int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if attempt > s.opts.MaxReconnectAttempts {
 		e := newError(CodeReconnectFailed, fmt.Sprintf("maximum reconnection attempts (%d) reached", s.opts.MaxReconnectAttempts))
-		em.fail(e)
+		em.fail(ctx, e)
 		return e
 	}
-	em.patch(func(st *Status) { st.Connection = Reconnecting; st.ConnectionAttempts = attempt })
+	em.patch(ctx, func(st *Status) {
+		st.Connection, st.Data = Reconnecting, DataNone
+		st.ConnectionAttempts = attempt
+	})
 	select {
 	case <-time.After(s.opts.ReconnectDelay):
+		return nil
 	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 // SetToken replaces the remote token. When connected, it sends the token at once.
@@ -390,10 +409,10 @@ func (s *Stream) dial(ctx context.Context) (*websocket.Conn, error) {
 }
 
 func (s *Stream) onOpen(ctx context.Context, em *emitter, conn *websocket.Conn) {
-	em.patch(func(st *Status) { st.Connection = Connected; st.ConnectionAttempts = 0 })
+	em.patch(ctx, func(st *Status) { st.Connection = Connected; st.ConnectionAttempts = 0 })
 	if !s.remote {
 		_ = writeJSON(ctx, conn, map[string]bool{"enable": true})
-		em.running(func(st *Status) { st.Auth = Authenticated })
+		em.running(ctx, func(st *Status) { st.Auth = Authenticated })
 		return
 	}
 	s.mu.Lock()
@@ -404,7 +423,7 @@ func (s *Stream) onOpen(ctx context.Context, em *emitter, conn *websocket.Conn) 
 	}
 	s.mu.Unlock()
 	if token != "" {
-		em.patch(func(st *Status) { st.Auth = Authenticating })
+		em.patch(ctx, func(st *Status) { st.Auth = Authenticating })
 		_ = writeJSON(ctx, conn, map[string]string{"token": token})
 	}
 	if len(subs) > 0 {
@@ -430,11 +449,16 @@ type connResult struct {
 // serve delivers one connection's messages until it ends. The reader
 // goroutine only performs WebSocket reads and hands the results over here,
 // so every callback and timer runs on the Run goroutine.
-func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn, dataTimer *time.Timer, waitForAuth bool) connResult {
+func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn, waitForAuth bool) connResult {
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 	reads := make(chan readResult, 1)
 	go readMessages(readCtx, conn, reads)
+
+	// A stopped timer never fires, so the first message arms it.
+	dataTimer := time.NewTimer(s.opts.DataTimeout)
+	dataTimer.Stop()
+	defer dataTimer.Stop()
 
 	var authC <-chan time.Time
 	if waitForAuth {
@@ -454,9 +478,9 @@ func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn, d
 				return connResult{closeCode: websocket.CloseStatus(r.err), authenticated: authenticated}
 			}
 			dataTimer.Reset(s.opts.DataTimeout)
-			s.touchData(em)
-			em.raw(r.data)
-			fatal, didAuthenticate := s.handleMessage(em, r.typ, r.data, authenticated)
+			s.touchData(ctx, em)
+			em.raw(ctx, r.data)
+			fatal, didAuthenticate := s.handleMessage(ctx, em, r.typ, r.data, authenticated)
 			if didAuthenticate {
 				authenticated = true
 				authC = nil
@@ -466,14 +490,14 @@ func (s *Stream) serve(ctx context.Context, em *emitter, conn *websocket.Conn, d
 				return connResult{fatal: fatal, authenticated: authenticated}
 			}
 		case <-dataTimer.C:
-			em.patch(func(st *Status) {
+			em.patch(ctx, func(st *Status) {
 				if st.Data == DataActive {
 					st.Data = DataStale
 				}
 			})
 		case <-authC:
 			e := newError(CodeConnectionTimeout, fmt.Sprintf("connection timed out after %s", s.opts.ConnectTimeout))
-			em.fail(e)
+			em.fail(ctx, e)
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return connResult{fatal: e, authenticated: authenticated}
 		}
@@ -496,7 +520,7 @@ func readMessages(ctx context.Context, conn *websocket.Conn, results chan<- read
 
 // handleMessage decodes one message. It returns a fatal device error and
 // whether this message completed remote authentication.
-func (s *Stream) handleMessage(em *emitter, typ websocket.MessageType, data []byte, authReported bool) (fatal *Error, authenticated bool) {
+func (s *Stream) handleMessage(ctx context.Context, em *emitter, typ websocket.MessageType, data []byte, authReported bool) (fatal *Error, authenticated bool) {
 	payload, barID := data, ""
 	if typ == websocket.MessageText {
 		var env struct {
@@ -507,11 +531,11 @@ func (s *Stream) handleMessage(em *emitter, typ websocket.MessageType, data []by
 			Device  RemoteDevice    `json:"device"`
 		}
 		if err := json.Unmarshal(data, &env); err != nil {
-			em.error(&Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+			em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
 			return nil, false
 		}
 		if strings.HasPrefix(env.Type, "device.") {
-			em.device(DeviceEvent{Type: env.Type, Device: env.Device})
+			em.device(ctx, DeviceEvent{Type: env.Type, Device: env.Device})
 			return nil, false
 		}
 		barID = env.BarID
@@ -520,11 +544,11 @@ func (s *Stream) handleMessage(em *emitter, typ websocket.MessageType, data []by
 		}
 		var err error
 		if payload, err = decodeEnvelopeState(env.State); err != nil {
-			em.error(&Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+			em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
 			return nil, false
 		}
 		if !authReported {
-			em.running(func(st *Status) { st.Auth = Authenticated })
+			em.running(ctx, func(st *Status) { st.Auth = Authenticated })
 		}
 		authenticated = true
 	}
@@ -533,7 +557,7 @@ func (s *Stream) handleMessage(em *emitter, typ websocket.MessageType, data []by
 	}
 	var raw pb.State
 	if err := proto.Unmarshal(payload, &raw); err != nil {
-		em.error(&Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
+		em.error(ctx, &Error{Code: CodeDecodeError, Message: "decode error: " + err.Error(), Data: data})
 		return nil, authenticated
 	}
 	if raw.Error != nil {
@@ -543,13 +567,19 @@ func (s *Stream) handleMessage(em *emitter, typ websocket.MessageType, data []by
 			Data:    raw.Error,
 		}
 		fatal := raw.Error.GetSeverity() == pb.Severity_FATAL
-		em.patch(func(st *Status) {
+		updateStatus := func(st *Status) {
 			applyError(st, e)
 			if fatal {
 				st.Main = Failed
+				st.Connection, st.Data = Disconnected, DataNone
 			}
-		})
-		em.error(e)
+		}
+		if fatal {
+			em.report(updateStatus)
+		} else {
+			em.patch(ctx, updateStatus)
+		}
+		em.error(ctx, e)
 		switch {
 		case fatal:
 			return e, authenticated
@@ -558,9 +588,9 @@ func (s *Stream) handleMessage(em *emitter, typ websocket.MessageType, data []by
 		}
 	}
 	state := processState(&raw, barID, func(err error) {
-		em.error(&Error{Code: CodeFrameProcessError, Message: err.Error()})
+		em.error(ctx, &Error{Code: CodeFrameProcessError, Message: err.Error()})
 	})
-	em.data(state)
+	em.data(ctx, state)
 	return nil, authenticated
 }
 
@@ -596,8 +626,8 @@ func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {
 }
 
 // touchData marks data active. Only a change is reported, not every message.
-func (s *Stream) touchData(em *emitter) {
-	if !em.live() {
+func (s *Stream) touchData(ctx context.Context, em *emitter) {
+	if ctx.Err() != nil {
 		return
 	}
 	s.mu.Lock()
@@ -615,28 +645,25 @@ func applyError(st *Status, e *Error) {
 	case CodeConnectionFailed, CodeConnectionLost, CodeReconnectFailed, CodeConnectionTimeout:
 		st.Connection, st.ConnectionError = Disconnected, e
 		st.Main, st.MainError = Failed, e
+		st.Data = DataNone
 	case CodeAuthFailed, CodeAuthRefreshFailed:
 		st.Auth, st.AuthError = AuthFailed, e
 		st.Main, st.MainError = Failed, e
+		st.Connection, st.Data = Disconnected, DataNone
 	case CodeDeviceError, CodeDecodeError:
 		st.MainError = e
 	}
 }
 
-// emitter delivers callbacks for one Run. Once the context is cancelled it
-// drops every status change and callback, so a callback that cancels sees
-// nothing more. Run reports the final Stopped status through report, which
-// has no such guard.
+// emitter delivers callbacks for one Run. report always changes the status
+// and calls Status, even after cancellation, so an error the stream has
+// already produced is reflected. patch is dropped after cancellation.
 type emitter struct {
 	s     *Stream
-	ctx   context.Context
 	cb    Callbacks
 	ready bool
 }
 
-func (e *emitter) live() bool { return e.ctx.Err() == nil }
-
-// report changes the status and reports the new snapshot, cancelled or not.
 func (e *emitter) report(fn func(*Status)) {
 	e.s.mu.Lock()
 	fn(&e.s.status)
@@ -647,17 +674,16 @@ func (e *emitter) report(fn func(*Status)) {
 	}
 }
 
-// patch is report while the Run is live.
-func (e *emitter) patch(fn func(*Status)) {
-	if e.live() {
+func (e *emitter) patch(ctx context.Context, fn func(*Status)) {
+	if ctx.Err() == nil {
 		e.report(fn)
 	}
 }
 
 // running marks the stream running and calls Ready the first time per Run.
-func (e *emitter) running(fn func(*Status)) {
-	e.patch(func(st *Status) { fn(st); st.Main = Running })
-	if e.ready || !e.live() {
+func (e *emitter) running(ctx context.Context, fn func(*Status)) {
+	e.patch(ctx, func(st *Status) { fn(st); st.Main = Running })
+	if e.ready || ctx.Err() != nil {
 		return
 	}
 	e.ready = true
@@ -666,31 +692,31 @@ func (e *emitter) running(fn func(*Status)) {
 	}
 }
 
-func (e *emitter) fail(err *Error) {
-	e.patch(func(st *Status) { applyError(st, err) })
-	e.error(err)
+func (e *emitter) fail(ctx context.Context, err *Error) {
+	e.report(func(st *Status) { applyError(st, err) })
+	e.error(ctx, err)
 }
 
-func (e *emitter) error(err *Error) {
-	if e.live() && e.cb.Error != nil {
+func (e *emitter) error(ctx context.Context, err *Error) {
+	if ctx.Err() == nil && e.cb.Error != nil {
 		e.cb.Error(err)
 	}
 }
 
-func (e *emitter) data(st *State) {
-	if e.live() && e.cb.Data != nil {
+func (e *emitter) data(ctx context.Context, st *State) {
+	if ctx.Err() == nil && e.cb.Data != nil {
 		e.cb.Data(st)
 	}
 }
 
-func (e *emitter) raw(b []byte) {
-	if e.live() && e.cb.RawData != nil {
+func (e *emitter) raw(ctx context.Context, b []byte) {
+	if ctx.Err() == nil && e.cb.RawData != nil {
 		e.cb.RawData(b)
 	}
 }
 
-func (e *emitter) device(ev DeviceEvent) {
-	if e.live() && e.cb.DeviceEvent != nil {
+func (e *emitter) device(ctx context.Context, ev DeviceEvent) {
+	if ctx.Err() == nil && e.cb.DeviceEvent != nil {
 		e.cb.DeviceEvent(ev)
 	}
 }
