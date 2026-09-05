@@ -11,7 +11,7 @@ GOLANGCI   := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1
 build:
 	go build ./...
 
-## test: unit tests with the race detector
+## test: tests with the race detector
 test:
 	go test -race ./...
 

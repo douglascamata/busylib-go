@@ -4,7 +4,7 @@ A Go port of [busylib-ts](https://github.com/busy-app/busylib-ts), the library
 for talking to the [BUSY Bar](https://busy.app/).
 
 Some features are also ported from the [busylib-py](https://github.com/busy-app/busylib-py)
-library (for instance, the image and audio converters).
+library (including discovery and the image and audio converters).
 
 > [!IMPORTANT]
 > **This is an unofficial project.** Built and maintained by
@@ -16,16 +16,57 @@ library (for instance, the image and audio converters).
 > **[busy.app](https://busy.app)** and
 > **[github.com/busy-app](https://github.com/busy-app)**.
 
-Four packages:
+Five packages:
 
 - **`busybar`**: a typed client for the BUSY Bar [HTTP API](https://docs.busy.app/bar/dev/http-api).
 - **`statestream`**: real-time device state over WebSocket, decoded from protobuf.
 - **`frame`**: pixel-format helpers for display frames (BGR, L4, L8, RLE, deflate) and an `image.RGBA` bridge.
 - **`media`**: image resizing and PNG encoding, plus audio conversion through FFmpeg.
+- **`discovery`**: find BUSY Bar devices over mDNS, including USB and Wi-Fi addresses.
 
 ```bash
 go get github.com/douglascamata/busylib-go
 ```
+
+## Discovery
+
+Import `github.com/douglascamata/busylib-go/discovery` to find nearby bars.
+The default scan lasts 1.5 seconds and uses all active multicast interfaces,
+including USB-Ethernet. It follows Python's `_http._tcp.local.` service and
+`busybar-` instance naming rules.
+
+```go
+devices, err := discovery.Discover(ctx, discovery.Options{})
+if err != nil {
+    log.Fatal(err)
+}
+for _, device := range devices {
+    ip, ok := device.Address(discovery.Any) // prefer USB, then Wi-Fi
+    if !ok {
+        continue
+    }
+    bar, err := busybar.New(busybar.Config{Addr: ip.String()})
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("%s (%s): %s\n", device.Name, device.ID, bar.Addr())
+}
+```
+
+Use `discovery.USB` or `discovery.WiFi` to select a specific connection.
+Results include the device name, ID, and unique IPv4 addresses. Like Python,
+addresses in `10.0.4.0/24` are classified as USB; other addresses are classified
+as Wi-Fi. Results are sorted by device ID, and addresses by IP.
+
+Set `Options.Timeout` for a longer scan or `Options.Interfaces` to select
+network interfaces. A normal scan timeout returns the devices found, with no
+error. Caller cancellation or a caller deadline returns partial results and
+the context error. A scan that finds nothing returns an empty slice.
+Discovery closes its sockets before returning.
+
+mDNS works on the local network and requires multicast traffic to be allowed.
+Discovery does not check HTTP reachability. Pass any required device password
+through `busybar.Config.HTTPAccessPassword` when creating the client.
 
 ## HTTP API
 
@@ -270,7 +311,7 @@ values the HTTP API uses.
 
 ```bash
 make build           # compile every package
-make test            # unit tests with the race detector
+make test            # tests with the race detector
 make smoke-test      # boots busybar-emulator and runs the smoke tests
 make lint            # gofmt, go vet, golangci-lint
 make generate-proto  # regenerate statestream/pb from proto/
@@ -283,8 +324,9 @@ script clones the revision in `scripts/emulator-revision` into `.cache/` on
 first run. Set `BUSYBAR_EMULATOR_DIR` to reuse a clean checkout of that revision.
 Existing checkouts are never reset by the script.
 
-CI installs FFmpeg and runs the unit tests, lint checks, and pinned emulator
-smoke tests. Locally, tests that execute FFmpeg skip when it is not installed.
+CI installs FFmpeg and runs the tests, lint checks, and pinned emulator smoke tests.
+The normal test suite includes local mDNS discovery tests, which need
+multicast-capable network interfaces. Locally, tests that execute FFmpeg skip when it is not installed.
 Run `go test -race -v ./media` with FFmpeg installed to check the converted
 PNG pixels and PCM samples, including all six audio input formats above. Python/Pillow image references
 can be regenerated with `python3 media/testdata/generate.py` (requires Pillow).
