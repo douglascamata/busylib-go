@@ -7,6 +7,7 @@ import (
 	"image"
 	"io"
 
+	"github.com/douglascamata/busylib-go/busybar"
 	"github.com/douglascamata/busylib-go/frame"
 	"github.com/douglascamata/busylib-go/statestream/pb"
 )
@@ -51,6 +52,9 @@ type Update struct {
 	*pb.StateUpdate
 	// Frame is set when Kind is KindFrame and the frame decoded successfully.
 	Frame *Frame
+	// Timer is set when Kind is KindTimer and its JSON decoded successfully.
+	// Use Timer.StateAt to calculate the current timer state.
+	Timer *busybar.BusySnapshot
 }
 
 // State is one decoded message from the device.
@@ -64,7 +68,7 @@ type State struct {
 	Raw   *pb.State
 }
 
-func processState(raw *pb.State, barID string, onFrameErr func(error)) *State {
+func processState(raw *pb.State, barID string, onError func(*Error)) *State {
 	st := &State{Timestamp: raw.GetTimestamp(), Error: raw.GetError(), BarID: barID, Raw: raw}
 	for _, u := range raw.GetUpdates() {
 		up := Update{Kind: kindOf(u), StateUpdate: u}
@@ -72,9 +76,16 @@ func processState(raw *pb.State, barID string, onFrameErr func(error)) *State {
 			rgba, err := DecodeFrame(f)
 			switch {
 			case err != nil:
-				onFrameErr(err)
+				onError(&Error{Code: CodeFrameProcessError, Message: err.Error(), Cause: err})
 			case rgba != nil:
 				up.Frame = &Frame{Screen: frame.Display(f.GetScreen()), Width: int(f.GetWidth()), Height: int(f.GetHeight()), RGBA: rgba}
+			}
+		}
+		if timer := u.GetTimer(); timer != nil {
+			var err error
+			up.Timer, err = DecodeTimer(timer)
+			if err != nil {
+				onError(&Error{Code: CodeDecodeError, Message: err.Error(), Cause: err})
 			}
 		}
 		st.Updates = append(st.Updates, up)

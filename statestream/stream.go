@@ -597,8 +597,8 @@ func (s *Stream) handleMessage(ctx context.Context, em *emitter, typ websocket.M
 			return nil, authenticated
 		}
 	}
-	state := processState(&raw, barID, func(err error) {
-		em.error(ctx, &Error{Code: CodeFrameProcessError, Message: err.Error(), Cause: err})
+	state := processState(&raw, barID, func(err *Error) {
+		em.error(ctx, err)
 	})
 	em.data(ctx, state)
 	return nil, authenticated

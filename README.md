@@ -323,6 +323,18 @@ Each `Update` embeds the decoded protobuf message, so `u.GetPower()`,
 `WifiSecurity`, `BleStatus`, ... functions map protobuf enums to the string
 values the HTTP API uses.
 
+Timer updates also provide `u.Timer`, a decoded `*busybar.BusySnapshot`. Use
+`u.Timer.StateAt(time.Now())` for the same calculation as HTTP snapshots.
+PLAIN and GZIP timer JSON are supported. Invalid timer data reports
+`CodeDecodeError`, leaves `Timer` nil, and does not discard other updates or
+stop the stream. `statestream.DecodeTimer` is also available for raw protobuf timers.
+
+For continuous tracking, read `BusySnapshotGet` once, then retain the newest
+`u.Timer` by `SnapshotTimestampMs` and recalculate on your own display ticker.
+Process snapshots and ticks on one goroutine, or protect shared state with a
+mutex. For remote streams, keep one snapshot per `State.BarID`. The stream
+delivers updates; it does not create a background timer or mutable dashboard cache.
+
 `statestream.NewRemote` connects to the BUSY cloud with a `Token`, an optional
 `TokenProvider` for refreshes, and `Subscribe(guid)` per device.
 

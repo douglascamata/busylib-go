@@ -133,7 +133,7 @@ func TestProcessStateSetsKindAndFrame(t *testing.T) {
 		{State: &pb.StateUpdate_Power{Power: &pb.Power{State: &pb.Power_Known{Known: &pb.PowerState{BatteryStatus: pb.BatteryStatus_CHARGING}}}}},
 		{},
 	}}
-	st := processState(raw, "bar-1", func(err error) { t.Error(err) })
+	st := processState(raw, "bar-1", func(err *Error) { t.Error(err) })
 	if st.Timestamp != 42 || st.BarID != "bar-1" || len(st.Updates) != 4 {
 		t.Fatalf("%+v", st)
 	}
