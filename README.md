@@ -166,6 +166,12 @@ snapshots keep their remaining time. With autostart off, the next phase waits
 for the user, unlike busylib-py 2.2.0's calculation. The result is an estimate
 from that snapshot; later button presses or writes require a new snapshot.
 
+To change or stop a timer, use `BusySnapshotSet` with a fresh
+`SnapshotTimestampMs`. Keep `BusyBarSettings` from the snapshot or profile.
+Go sends these settings for every snapshot type, including `BusyNotStarted`,
+and preserves required false and zero values. Use profile durations for interval
+timers; the device has minimum duration and cycle-count requirements.
+
 ## Image and audio conversion
 
 Import `github.com/douglascamata/busylib-go/media`. Each converter takes file
