@@ -1,4 +1,4 @@
-package notification_test
+package busybar_test
 
 import (
 	"context"
@@ -9,25 +9,24 @@ import (
 	"testing"
 
 	"github.com/douglascamata/busylib-go/busybar"
-	"github.com/douglascamata/busylib-go/notification"
 )
 
 func TestBuildLayouts(t *testing.T) {
 	// Reference offsets and asset widths: busylib-py 2.1.0 notification.py.
 	for _, tc := range []struct {
 		name, text        string
-		opts              notification.Options
+		opts              busybar.NotificationOptions
 		x, y, width, rate int
 	}{
-		{"plain small", "Ready", notification.Options{}, 2, 7, 0, 0},
-		{"tiny centered", "Ready", notification.Options{Font: busybar.FontTiny}, 2, 8, 0, 0},
-		{"extra large centered", "Ready", notification.Options{Font: busybar.FontExtraLarge}, 2, 8, 0, 0},
-		{"narrow icon", "Ready", notification.Options{Icon: "clock"}, 7, 7, 0, 0},
-		{"wide icon scroll", "A long notification", notification.Options{Icon: "start"}, 13, 7, 59, 1200},
-		{"unicode counts characters", "éééééééé", notification.Options{}, 2, 7, 0, 0},
+		{"plain small", "Ready", busybar.NotificationOptions{}, 2, 7, 0, 0},
+		{"tiny centered", "Ready", busybar.NotificationOptions{Font: busybar.FontTiny}, 2, 8, 0, 0},
+		{"extra large centered", "Ready", busybar.NotificationOptions{Font: busybar.FontExtraLarge}, 2, 8, 0, 0},
+		{"narrow icon", "Ready", busybar.NotificationOptions{Icon: "clock"}, 7, 7, 0, 0},
+		{"wide icon scroll", "A long notification", busybar.NotificationOptions{Icon: "start"}, 13, 7, 59, 1200},
+		{"unicode counts characters", "éééééééé", busybar.NotificationOptions{}, 2, 7, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			params, err := notification.Build(tc.text, tc.opts)
+			params, err := busybar.BuildNotification(tc.text, tc.opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,7 +49,7 @@ func TestBuildLayouts(t *testing.T) {
 		{busybar.FontTiny, 1, 15}, {busybar.FontSmall, 0, 16},
 		{busybar.FontNormal, -1, 17}, {busybar.FontCondensed, -1, 17}, {busybar.FontBold, -1, 17},
 	} {
-		params, err := notification.Build("First", notification.Options{Line2: "Second", Font: tc.font, Duration: 5, Color: "#FF0000FF", Line2Color: "#00FF00FF"})
+		params, err := busybar.BuildNotification("First", busybar.NotificationOptions{Line2: "Second", Font: tc.font, Duration: 5, Color: "#FF0000FF", Line2Color: "#00FF00FF"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,11 +61,11 @@ func TestBuildLayouts(t *testing.T) {
 }
 
 func TestBuildRejectsInvalidLayout(t *testing.T) {
-	for _, opts := range []notification.Options{
+	for _, opts := range []busybar.NotificationOptions{
 		{Font: busybar.FontGlobal}, {Font: busybar.FontLarge, Line2: "Second"},
 		{Icon: "missing"}, {Duration: -1}, {Priority: 101}, {Priority: -1},
 	} {
-		if _, err := notification.Build("text", opts); err == nil {
+		if _, err := busybar.BuildNotification("text", opts); err == nil {
 			t.Fatalf("accepted %+v", opts)
 		}
 	}
@@ -121,9 +120,9 @@ func TestNotifyWireAndFailureOrdering(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = notification.Notify(context.Background(), client, "Laundry done", notification.Options{
+			err = client.Notify(context.Background(), "Laundry done", busybar.NotificationOptions{
 				Line2: "Ready", Icon: "check", Sound: tc.sound, BackgroundColor: "#0000FFFF", Duration: 10,
-				Priority: notification.PriorityInterrupt, ApplicationName: "laundry",
+				Priority: busybar.NotificationPriorityInterrupt, ApplicationName: "laundry",
 			})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error %v", err)
