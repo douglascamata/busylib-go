@@ -37,7 +37,7 @@ type Config struct {
 	Addr string
 	// Token is the bearer token for the BUSY proxy (https://api.busy.app).
 	Token string
-	// HTTPAccessPassword is the optional HTTP access password of the device.
+	// HTTPAccessPassword is the device PIN or a local access token (X-API-Token).
 	HTTPAccessPassword string
 	// Timeout is the default per-request timeout. Zero means DefaultTimeout;
 	// a negative value disables the default.
@@ -143,7 +143,7 @@ func (c *Client) SetToken(token string) {
 	c.token = token
 }
 
-// SetHTTPAccessPassword replaces the HTTP access password (X-API-Token header).
+// SetHTTPAccessPassword replaces the device PIN or local token (X-API-Token).
 func (c *Client) SetHTTPAccessPassword(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

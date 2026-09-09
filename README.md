@@ -173,6 +173,25 @@ Go sends these settings for every snapshot type, including `BusyNotStarted`,
 and preserves required false and zero values. Use profile durations for interval
 timers; the device has minimum duration and cycle-count requirements.
 
+### Local access tokens
+
+Firmware 1.2.3 (API 27.5.0) adds separate, revocable credentials for integrations:
+
+```go
+token, err := bar.SettingsAccessTokenCreate(ctx, "my integration")
+if err != nil {
+    log.Fatal(err)
+}
+// Save token.Token securely now; the device returns the secret only once.
+bar.SetHTTPAccessPassword(token.Token)
+```
+
+Use `SettingsAccessTokensGet` to list metadata, `SettingsAccessTokenRevoke`
+with a `ShortID` to revoke one token, or `SettingsAccessTokensDeleteAll` to
+revoke all. Older firmware returns an HTTP error for unsupported endpoints.
+`HTTPAccessPassword` accepts a device PIN or local token through `X-API-Token`.
+`Config.Token` remains the separate cloud bearer token.
+
 ## Notifications
 
 `notification.Notify` draws a front-display notification and then plays its
