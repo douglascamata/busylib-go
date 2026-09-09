@@ -106,7 +106,8 @@ func (s BusySnapshotState) MarshalJSON() ([]byte, error) {
 	return json.Marshal(fields)
 }
 
-// BusySnapshotGet returns the running timer state.
+// BusySnapshotGet returns the last stored timer snapshot. Use StateAt to
+// calculate its current state; repeated reads need not change the timestamp.
 func (c *Client) BusySnapshotGet(ctx context.Context) (*BusySnapshot, error) {
 	var out BusySnapshot
 	return &out, c.do(ctx, request{method: http.MethodGet, path: "/busy/snapshot"}, &out)

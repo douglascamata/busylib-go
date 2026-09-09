@@ -135,6 +135,37 @@ w, h := frame.Dimensions(frame.Front)
 png.Encode(file, frame.ToImage(rgba, w, h))
 ```
 
+### Timers
+
+`BusySnapshotGet` returns the last stored snapshot, not a live countdown.
+Use `StateAt` to calculate the current state without another request:
+
+```go
+snapshot, err := bar.BusySnapshotGet(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+state, err := snapshot.StateAt(time.Now())
+if err != nil {
+    log.Fatal(err)
+}
+if state.TimeLeftMs != nil {
+    fmt.Printf("%s: %d ms left\n", state.Phase, *state.TimeLeftMs)
+}
+```
+
+`Mode` uses the existing `BusyNotStarted`, `BusyInfinite`, `BusySimple`, and
+`BusyInterval` values. `IsRunning()` includes paused sessions. `TimeLeftMs` is
+nil for idle and infinite timers. `Phase` is work/rest for interval timers,
+work for infinite timers, and empty otherwise. `Interval` counts phases from
+zero: even is work, odd is rest. A session finishes after its final work phase.
+
+Calculation uses milliseconds, as in Python; the device display ticks in seconds.
+Use a clock aligned with the device. A future snapshot is not advanced. Paused
+snapshots keep their remaining time. With autostart off, the next phase waits
+for the user, unlike busylib-py 2.2.0's calculation. The result is an estimate
+from that snapshot; later button presses or writes require a new snapshot.
+
 ## Image and audio conversion
 
 Import `github.com/douglascamata/busylib-go/media`. Each converter takes file
