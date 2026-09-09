@@ -16,13 +16,14 @@ library (including discovery and the image and audio converters).
 > **[busy.app](https://busy.app)** and
 > **[github.com/busy-app](https://github.com/busy-app)**.
 
-Five packages:
+Six packages:
 
 - **`busybar`**: a typed client for the BUSY Bar [HTTP API](https://docs.busy.app/bar/dev/http-api).
 - **`statestream`**: real-time device state over WebSocket, decoded from protobuf.
 - **`frame`**: pixel-format helpers for display frames (BGR, L4, L8, RLE, deflate) and an `image.RGBA` bridge.
 - **`media`**: image resizing and PNG encoding, plus audio conversion through FFmpeg.
 - **`discovery`**: find BUSY Bar devices over mDNS, including USB and Wi-Fi addresses.
+- **`notification`**: one- and two-line notification layouts with icons and sound.
 
 ```bash
 go get github.com/douglascamata/busylib-go
@@ -171,6 +172,35 @@ To change or stop a timer, use `BusySnapshotSet` with a fresh
 Go sends these settings for every snapshot type, including `BusyNotStarted`,
 and preserves required false and zero values. Use profile durations for interval
 timers; the device has minimum duration and cycle-count requirements.
+
+## Notifications
+
+`notification.Notify` draws a front-display notification and then plays its
+optional sound. `notification.Build` returns editable `DisplayDrawParams`
+without network calls or sound playback.
+
+```go
+err := notification.Notify(ctx, bar, "Laundry done", notification.Options{
+    Line2: "Ready to collect",
+    Icon: "check",
+    Sound: "event",
+    Duration: 10, // seconds; zero stays until cleared
+    ApplicationName: "laundry",
+})
+```
+
+The default font is small. One line supports tiny, small, normal, condensed,
+bold, large, and extra_large; two lines support the first five. Layout offsets
+and asset paths follow busylib-py. Long lines scroll using an approximate
+character budget. Colors use `#RRGGBBAA` through `Color`, `Line2Color`, and
+`BackgroundColor`. Backgrounds need API 24.3.0; `Notify` checks the device version.
+When using `Build` directly, the caller is responsible for that version requirement.
+
+Icons: check, error, info, low_battery, clock, hourglass, start, setup.
+Sounds: event, reminder, volume. Priority defaults to 50;
+`notification.PriorityInterrupt` (91) places the message above a Busy session.
+Clear it with `bar.DisplayClear(ctx, "laundry")`. Sound uses a separate request:
+a draw error prevents sound, while a sound error can follow a successful draw.
 
 ## Image and audio conversion
 
