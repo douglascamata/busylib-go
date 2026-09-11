@@ -246,9 +246,9 @@ rules match Python. Image conversion does not require FFmpeg.
 
 ```go
 asset, err := media.ConvertImage(
-	"photo.jpg", 
-	imageBytes, 
-	media.ImageOptions{Display: frame.Back},
+ "photo.jpg", 
+ imageBytes, 
+ media.ImageOptions{Display: frame.Back},
 )
 if err != nil {
     log.Fatal(err)
@@ -428,17 +428,7 @@ Run `go test -race -v ./media` with FFmpeg installed to check the converted
 PNG pixels and PCM samples, including all six audio input formats above. Python/Pillow image references
 can be regenerated with `python3 media/testdata/generate.py` (requires Pillow).
 
-For an upstream review, use the `review-upstream` skill or run the script directly
-with Python 3 and Git:
-
-```bash
-python3 scripts/review-upstream.py ts --from REVIEWED_SHA --to TARGET_REF --output .cache/upstream-review/ts.md
-```
-
-Replace the placeholders with a previously reviewed commit and the target commit,
-branch, or tag. Sources are `ts`, `protobuf`, and `firmware`. The report includes
-resolved revisions, source links, all changed files, and a focused diff. This is
-an on-demand review aid; it does not certify compatibility or update any pins.
+Agent instructions are in [AGENTS.md](AGENTS.md).
 
 ## License
 
