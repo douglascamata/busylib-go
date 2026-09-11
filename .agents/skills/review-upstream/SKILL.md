@@ -1,12 +1,14 @@
 ---
 name: review-upstream
 description: Review upstream changes for their impact on busylib-go, using busylib-py as the primary client source and busylib-ts as secondary. Check protobuf and firmware for wire behavior. Use when updating upstream references or checking compatibility drift. Produces evidence and recommendations; does not automatically change code or pins.
+compatibility: Requires uv, Python 3, Git, and network access to GitHub.
 ---
 
 # Review upstream changes
 
-Run from the busylib-go repository root. Use Python 3 and Git; the script
-caches public upstream repositories under `.cache/upstream-review/`.
+Requires `uv`, Python 3, and Git. Run the [script](scripts/review-upstream.py)
+from the busylib-go repository root with `uv run`. The script caches public
+upstream repositories under `.cache/upstream-review/`.
 
 Use [busylib-py](https://github.com/busy-app/busylib-py) as the primary source
 for client behavior and features. Use
@@ -26,7 +28,7 @@ to cross-check behavior and cover gaps in Python.
 2. Run the script with explicit revisions. Replace the example placeholders:
 
    ```sh
-   python3 scripts/review-upstream.py py --from REVIEWED_SHA --to TARGET_REF --output .cache/upstream-review/py.md
+   uv run .agents/skills/review-upstream/scripts/review-upstream.py py --from REVIEWED_SHA --to TARGET_REF --output .cache/upstream-review/py.md
    ```
 
    Sources are `py` (primary client), `ts` (secondary client), `protobuf`, and
