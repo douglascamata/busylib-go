@@ -56,12 +56,12 @@ release-notes: require-version
 release-tag: require-version
 	@test -f .changes/$(VERSION).md || { echo ".changes/$(VERSION).md not found, run: make release-notes VERSION=$(VERSION)"; exit 1; }
 	git add CHANGELOG.md .changes
-	git commit -m "Release $(VERSION)"
+	git commit -m "Release $(VERSION)" -- CHANGELOG.md .changes
 	git tag -a $(VERSION) -m "$(VERSION)"
 
 ## release-push: push the release commit and the tag $(VERSION)
 release-push: require-version
-	git push origin HEAD $(VERSION)
+	git push --atomic origin HEAD $(VERSION)
 
 ## release: release-notes, release-tag and release-push in one go
 release: require-version
