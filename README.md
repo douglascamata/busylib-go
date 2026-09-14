@@ -413,7 +413,16 @@ make smoke-test      # boots busybar-emulator and runs the smoke tests
 make lint            # gofmt, go vet, golangci-lint
 make generate-proto  # regenerate statestream/pb from proto/
 make update-protos   # fetch the latest bsb-protobuf schemas, then regenerate
+make change          # write a changelog fragment for an unreleased change
+make release-notes VERSION=vX.Y.Z  # batch fragments into .changes/ and CHANGELOG.md
+make release-tag VERSION=vX.Y.Z    # commit the release notes and tag
+make release-push VERSION=vX.Y.Z   # push the release commit and tag
+make release VERSION=vX.Y.Z        # the three release steps in one go
 ```
+
+Changes are tracked with [changie](https://github.com/miniscruff/changie): add a
+fragment under `.changes/unreleased/` with each change; releases batch them into
+`.changes/vX.Y.Z.md` and `CHANGELOG.md`. The tag is the module version.
 
 The smoke tests drive the HTTP client and the WebSocket stream against
 [busybar-emulator](https://github.com/maxswinkels/busybar-emulator). The

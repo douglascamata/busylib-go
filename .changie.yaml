@@ -1,0 +1,52 @@
+# changie configuration: https://changie.dev/config/
+# Fragments live in .changes/unreleased/ and are batched into .changes/vX.Y.Z.md
+# and CHANGELOG.md at release time (see the release targets in the Makefile).
+changesDir: .changes
+unreleasedDir: unreleased
+headerPath: header.tpl.md
+changelogPath: CHANGELOG.md
+versionExt: md
+versionFormat: '## {{.Version}} - {{.Time.Format "2006-01-02"}}'
+kindFormat: '### {{.Kind}}'
+changeFormat: '- {{.Body}}'
+body:
+  minLength: 10
+# `auto` drives `changie batch auto`. Nothing maps to major while the module is
+# pre-1.0; pass the version explicitly for a breaking release.
+kinds:
+  - label: Added
+    auto: minor
+  - label: Changed
+    auto: minor
+  - label: Deprecated
+    auto: minor
+  - label: Removed
+    auto: minor
+  - label: Fixed
+    auto: patch
+  - label: Security
+    auto: patch
+  # Upstream records moves of proto/UPSTREAM_COMMIT, scripts/emulator-revision,
+  # or the firmware / API version the client was checked against.
+  - label: Upstream
+    auto: patch
+    changeFormat: '- {{.Body}} ({{.Custom.Source}} `{{.Custom.Revision}}`)'
+    additionalChoices:
+      - key: Source
+        type: enum
+        label: Upstream source
+        enumOptions:
+          - bsb-protobuf
+          - busybar-emulator
+          - busybar-firmware
+          - busylib-py
+          - busylib-ts
+      - key: Revision
+        type: string
+        label: Commit, tag, or version now pinned or checked against
+        minLength: 1
+newlines:
+  beforeChangelogVersion: 1
+  beforeKind: 1
+  afterKind: 1
+  endOfVersion: 1
