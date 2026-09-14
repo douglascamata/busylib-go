@@ -423,6 +423,7 @@ make release VERSION=vX.Y.Z        # the three release steps in one go
 Changes are tracked with [changie](https://github.com/miniscruff/changie): add a
 fragment under `.changes/unreleased/` with each change; releases batch them into
 `.changes/vX.Y.Z.md` and `CHANGELOG.md`. The tag is the module version.
+Releases start only from a clean `main` checkout that matches `origin/main`.
 
 The smoke tests drive the HTTP client and the WebSocket stream against
 [busybar-emulator](https://github.com/maxswinkels/busybar-emulator). The

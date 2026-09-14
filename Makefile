@@ -5,9 +5,10 @@ PROTO_REPO := https://github.com/flipperdevices/bsb-protobuf.git
 PROTOS     := $(shell cd $(PROTO_DIR) && find . -name '*.proto' | sed 's|^\./||' | sort)
 GOLANGCI   := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 CHANGIE    := go run github.com/miniscruff/changie@v1.26.0
+RELEASE_BRANCH := main
 
 .PHONY: build test smoke-test lint generate-proto update-protos \
-	change release-notes release-tag release-push release require-version
+	change release-notes release-tag release-push release release-guard require-version
 
 ## build: compile every package (this is a library, there is no binary)
 build:
@@ -48,7 +49,7 @@ change:
 	$(CHANGIE) new
 
 ## release-notes: batch unreleased fragments into .changes/$(VERSION).md and rebuild CHANGELOG.md
-release-notes: require-version
+release-notes: require-version release-guard
 	$(CHANGIE) batch $(VERSION)
 	$(CHANGIE) merge
 
@@ -71,3 +72,11 @@ release: require-version
 
 require-version:
 	@case "$(VERSION)" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "usage: make $(MAKECMDGOALS) VERSION=vX.Y.Z"; exit 1;; esac
+
+# Runs once, before release-notes: the later steps create the release commit,
+# so the tree no longer matches the remote by design.
+release-guard:
+	@test "$$(git symbolic-ref --short -q HEAD)" = "$(RELEASE_BRANCH)" || { echo "release from $(RELEASE_BRANCH), not $$(git symbolic-ref --short -q HEAD || echo 'detached HEAD')"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "working tree is not clean, commit or remove these first:"; git status --short; exit 1; }
+	@git fetch -q origin $(RELEASE_BRANCH)
+	@test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/$(RELEASE_BRANCH))" || { echo "HEAD is not at origin/$(RELEASE_BRANCH), pull or push first"; exit 1; }
