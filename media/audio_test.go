@@ -85,8 +85,14 @@ func TestConvertAudioInvalidInput(t *testing.T) {
 	requireFFmpeg(t)
 	_, err := media.ConvertAudio(context.Background(), "bad.mp3", []byte("not audio"))
 	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || !strings.Contains(err.Error(), "bad.mp3") || !strings.Contains(err.Error(), "Invalid data") {
+	if !errors.As(err, &exitErr) || !strings.Contains(err.Error(), "bad.mp3") {
 		t.Fatalf("error = %v", err)
+	}
+	// FFmpeg's diagnostic wording varies by version; require stderr without
+	// depending on a particular message.
+	_, stderr, ok := strings.Cut(err.Error(), exitErr.Error()+": ")
+	if !ok || strings.TrimSpace(stderr) == "" {
+		t.Fatalf("error missing FFmpeg diagnostics: %v", err)
 	}
 }
 
