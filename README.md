@@ -280,29 +280,94 @@ Sounds: event, reminder, volume. Priority defaults to 50;
 Clear it with `bar.DisplayClear(ctx, "laundry")`. Sound uses a separate request:
 a draw error prevents sound, while a sound error can follow a successful draw.
 
-Use `CustomIcon` and `CustomSound` for assets outside the aliases. An uploaded
-`Path` is relative to the same `ApplicationName` used for upload and notification.
-A `StockPath` must name a file in `shared/images/` or `shared/sounds/`; the firmware
-does not resolve other stock directories through these endpoints.
+### Upload custom icons and sounds
+
+Upload the files with `AssetsUpload`, then select them with `CustomIcon` and
+`CustomSound`. Use the same `ApplicationName` for upload, icon lookup, and
+notification. Each `NotificationAsset.Path` is the `File` name passed to upload,
+not a local file path or a full device path.
+
+This example reads a **16×16 PNG icon** and an MP3 from a local `assets/` folder.
+It uses `os.ReadFile` and the `github.com/douglascamata/busylib-go/media` package.
+[Audio conversion](#audio) requires FFmpeg on `PATH`.
 
 ```go
-icon, err := bar.NotificationIconGet(ctx, "laundry", busybar.NotificationAsset{Path: "done.png"})
+const app = "laundry"
+
+iconBytes, err := os.ReadFile("assets/done.png")
 if err != nil {
     log.Fatal(err)
 }
-err = bar.Notify(ctx, "Laundry done", busybar.NotificationOptions{
-    ApplicationName: "laundry",
-    CustomIcon: icon,
-    CustomSound: &busybar.NotificationAsset{Path: "ding.wav"},
+// Keep the icon's small dimensions. Default conversion targets a full display.
+iconAsset, err := media.ConvertImage("done.png", iconBytes, media.ImageOptions{
+    NoScale: true, NoCrop: true,
 })
+if err != nil {
+    log.Fatal(err)
+}
+
+soundBytes, err := os.ReadFile("assets/ding.mp3")
+if err != nil {
+    log.Fatal(err)
+}
+soundAsset, err := media.ConvertAudio(ctx, "ding.mp3", soundBytes)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Upload converted bytes under the names returned by the converters.
+for _, asset := range []media.Asset{iconAsset, soundAsset} {
+    if err := bar.AssetsUpload(ctx, busybar.AssetsUploadParams{
+        ApplicationName: app, File: asset.Name, Data: asset.Data,
+    }); err != nil {
+        log.Fatal(err)
+    }
+}
+
+// Read the uploaded icon's dimensions so Notify can place text beside it.
+icon, err := bar.NotificationIconGet(ctx, app, busybar.NotificationAsset{
+    Path: iconAsset.Name,
+})
+if err != nil {
+    log.Fatal(err)
+}
+if err := bar.Notify(ctx, "Laundry done", busybar.NotificationOptions{
+    ApplicationName: app,
+    CustomIcon: icon,
+    CustomSound: &busybar.NotificationAsset{Path: soundAsset.Name},
+    Duration: 10,
+}); err != nil {
+    log.Fatal(err)
+}
 ```
 
-The icon helper reads PNG or firmware `.image` dimensions. Reuse its result while
-the file stays unchanged, or supply a `NotificationIcon` with known dimensions
-directly to `BuildNotification`. Icons must fit within 69×16 pixels to leave room
-for text. The builder stays offline; `Notify` sends only the draw and optional
-sound requests. Alias/custom pairs are mutually exclusive. No catalogue scan or
-automatic upload is needed.
+Here the uploaded names are `done.png` and `ding.wav`. The converters return
+these names; use them instead of the source names. `AssetsUpload` sends bytes
+unchanged. `ConvertAudio` produces the device's headerless PCM audio, even though
+its output name ends in `.wav`. A regular WAV file also needs conversion.
+
+Upload once and reuse the icon and sound references in later `Notify` calls.
+Upload again when the files change, and repeat `NotificationIconGet` if the icon
+changes. `Notify` does not upload files or read their dimensions. It sends the
+draw request, then the optional sound request.
+
+`NotificationIconGet` reads PNG or firmware `.image` dimensions. Icons must fit
+within 69×16 pixels to leave room for text. Prepare a small icon before upload;
+the helper does not resize it. If you know the dimensions, you can skip that
+device read and pass this value to `CustomIcon` in `Notify` or `BuildNotification`:
+
+```go
+icon := &busybar.NotificationIcon{
+    Asset: busybar.NotificationAsset{Path: "done.png"},
+    Width: 16, Height: 16,
+}
+```
+
+You can mix a custom icon with a sound alias, or an icon alias with a custom
+sound. Do not set both `Icon` and `CustomIcon`, or both `Sound` and `CustomSound`.
+For files already supplied by the firmware, use `StockPath` instead of `Path`;
+no upload is needed. A stock path must name a file in `shared/images/` or
+`shared/sounds/`. Other stock directories are not supported by these endpoints.
 
 ## Image and audio conversion
 
