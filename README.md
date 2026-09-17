@@ -193,6 +193,45 @@ atomic against other clients. Use a clock aligned with the device. Equal or
 slightly future timestamps advance by one millisecond so sequential writes are
 accepted; the raw `BusySnapshotSet` method still sends the timestamp you supply.
 
+Start the stored busy profile with `BusyStart(ctx, busybar.BusyStartParams{})`.
+Use `Slot: busybar.BusySlotCustom` for the other profile. Optional settings replace
+the selected profile's settings for this session only:
+
+```go
+err := bar.BusyStart(ctx, busybar.BusyStartParams{
+    TimerSettings: &busybar.BusyTimerSettings{
+        Type: busybar.BusySimple, TotalTimeMs: (45 * time.Minute).Milliseconds(),
+    },
+})
+```
+
+To start a card outside both slots, supply `CardID`, `TimerSettings`, and
+`BusyBarSettings`. The ID must have UUID form. This reads the latest snapshot
+for its timestamp, but does not read or write either stored profile.
+
+For a lasting change, edit the stored profile. The helper keeps fields you do
+not change, validates the timer, and supplies a newer profile timestamp:
+
+```go
+profile, err := bar.BusyProfileUpdate(ctx, busybar.BusySlotCustom, func(p *busybar.BusyProfile) error {
+    p.TimerSettings = busybar.BusyTimerSettings{
+        Type: busybar.BusyInterval,
+        IntervalWorkMs: (25 * time.Minute).Milliseconds(),
+        IntervalRestMs: (5 * time.Minute).Milliseconds(),
+        IntervalWorkCyclesCount: 4,
+        IsAutostartEnabled: false,
+    }
+    p.BusyBarSettings.Theme = "meeting"
+    return nil
+})
+```
+
+The callback runs synchronously. An error prevents the write. Replace the whole
+`TimerSettings` value when changing type; the helper supplies no duration defaults.
+`BusyStart` and `BusyProfileUpdate` check firmware limits: work/rest phases each
+5 minutes–8 hours, 2–35 work cycles, and countdowns from zero to 24 hours.
+Raw snapshot/profile setters remain available for callers managing the wire values.
+
 ### Local access tokens
 
 Firmware 1.2.3 (API 27.5.0) adds separate, revocable credentials for integrations:
