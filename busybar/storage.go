@@ -41,6 +41,18 @@ func (c *Client) StorageWrite(ctx context.Context, path string, data []byte) err
 	}, nil)
 }
 
+// StorageAppend appends bytes to a file, creating it if needed.
+// Data is sent unchanged. Requires API 27.5.0 or newer.
+func (c *Client) StorageAppend(ctx context.Context, path string, data []byte) error {
+	return c.do(ctx, request{
+		method:      http.MethodPost,
+		path:        "/storage/write",
+		query:       url.Values{"path": {path}, "append": {"1"}},
+		body:        data,
+		contentType: "application/octet-stream",
+	}, nil)
+}
+
 // StorageRead returns the content of a file.
 func (c *Client) StorageRead(ctx context.Context, path string) ([]byte, error) {
 	var out []byte

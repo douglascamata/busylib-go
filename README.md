@@ -97,6 +97,10 @@ Method names follow the TypeScript library: `SystemStatusGet`, `DisplayDraw`,
 Use `DisplayElementsDelete(ctx, applicationName, []string{"icon"})` to remove
 only selected element IDs (API 27.3.0+). An empty selection does nothing.
 
+`StorageWrite` replaces a file. `StorageAppend(ctx, path, data)` adds bytes to
+the end, or creates the file if it is missing (API 27.5.0+). Both send bytes
+unchanged; media conversion remains explicit.
+
 ### Connection
 
 `Addr` accepts an IP, a host name, or a full URL. Without a scheme, `http://`
