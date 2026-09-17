@@ -76,10 +76,7 @@ func (s BusySnapshot) StateAt(now time.Time) (TimerState, error) {
 					state.IsFinished = true
 					return state, nil
 				}
-				duration := settings.IntervalWorkMs
-				if state.Interval%2 != 0 {
-					duration = settings.IntervalRestMs
-				}
+				duration := intervalDuration(state.Interval, *settings)
 				if !settings.IsAutostartEnabled {
 					left = duration
 					state.IsPaused = true
@@ -97,4 +94,11 @@ func (s BusySnapshot) StateAt(now time.Time) (TimerState, error) {
 	default:
 		return TimerState{}, fmt.Errorf("busybar: unsupported snapshot type %q", inner.Type)
 	}
+}
+
+func intervalDuration(index int, settings BusyTimerSettings) int64 {
+	if index%2 != 0 {
+		return settings.IntervalRestMs
+	}
+	return settings.IntervalWorkMs
 }

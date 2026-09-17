@@ -180,6 +180,19 @@ Go sends these settings for every snapshot type, including `BusyNotStarted`,
 and preserves required false and zero values. Use profile durations for interval
 timers; the device has minimum duration and cycle-count requirements.
 
+Use `BusySetPaused(ctx, true)` to pause, `BusySetPaused(ctx, false)` to resume,
+`BusyNextPhase(ctx)` to skip an interval phase, and `BusyStop(ctx)` to stop.
+`BusySessionThemeSet(ctx, "meeting")` changes only the running session's theme;
+the theme must already exist on the device. Each helper reads the snapshot,
+advances its remaining time, and writes a newer timestamp. Finished sessions
+return `ErrTimerNotRunning` for pause, resume, skip, and theme changes.
+Skipping the final work phase stops the session without adding a final rest.
+
+Serialize timer controls per device. These HTTP read/write operations are not
+atomic against other clients. Use a clock aligned with the device. Equal or
+slightly future timestamps advance by one millisecond so sequential writes are
+accepted; the raw `BusySnapshotSet` method still sends the timestamp you supply.
+
 ### Local access tokens
 
 Firmware 1.2.3 (API 27.5.0) adds separate, revocable credentials for integrations:
