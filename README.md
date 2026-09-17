@@ -280,6 +280,30 @@ Sounds: event, reminder, volume. Priority defaults to 50;
 Clear it with `bar.DisplayClear(ctx, "laundry")`. Sound uses a separate request:
 a draw error prevents sound, while a sound error can follow a successful draw.
 
+Use `CustomIcon` and `CustomSound` for assets outside the aliases. An uploaded
+`Path` is relative to the same `ApplicationName` used for upload and notification.
+A `StockPath` must name a file in `shared/images/` or `shared/sounds/`; the firmware
+does not resolve other stock directories through these endpoints.
+
+```go
+icon, err := bar.NotificationIconGet(ctx, "laundry", busybar.NotificationAsset{Path: "done.png"})
+if err != nil {
+    log.Fatal(err)
+}
+err = bar.Notify(ctx, "Laundry done", busybar.NotificationOptions{
+    ApplicationName: "laundry",
+    CustomIcon: icon,
+    CustomSound: &busybar.NotificationAsset{Path: "ding.wav"},
+})
+```
+
+The icon helper reads PNG or firmware `.image` dimensions. Reuse its result while
+the file stays unchanged, or supply a `NotificationIcon` with known dimensions
+directly to `BuildNotification`. Icons must fit within 69×16 pixels to leave room
+for text. The builder stays offline; `Notify` sends only the draw and optional
+sound requests. Alias/custom pairs are mutually exclusive. No catalogue scan or
+automatic upload is needed.
+
 ## Image and audio conversion
 
 Import `github.com/douglascamata/busylib-go/media`. Each converter takes file

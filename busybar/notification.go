@@ -18,6 +18,8 @@ type NotificationOptions struct {
 	Line2 string
 	// Icon is check, error, info, low_battery, clock, hourglass, start, or setup.
 	Icon string
+	// CustomIcon selects an uploaded or shared icon. Do not combine it with Icon.
+	CustomIcon *NotificationIcon
 	// Font defaults to small. Large and extra_large support one line only.
 	Font       Font
 	Color      string
@@ -32,6 +34,8 @@ type NotificationOptions struct {
 	ApplicationName string
 	// Sound is event, reminder, or volume. Only Notify plays it.
 	Sound string
+	// CustomSound selects an uploaded or shared sound. Do not combine it with Sound.
+	CustomSound *NotificationAsset
 }
 
 type stockIcon struct {
@@ -107,15 +111,28 @@ func BuildNotification(text string, opts NotificationOptions) (DisplayDrawParams
 		})
 	}
 	x := 2
-	if opts.Icon != "" {
-		icon, ok := icons[opts.Icon]
+	if opts.Icon != "" && opts.CustomIcon != nil {
+		return DisplayDrawParams{}, fmt.Errorf("notification: select either Icon or CustomIcon")
+	}
+	var icon *NotificationIcon
+	if opts.CustomIcon != nil {
+		icon = opts.CustomIcon
+	} else if opts.Icon != "" {
+		stock, ok := icons[opts.Icon]
 		if !ok {
 			return DisplayDrawParams{}, fmt.Errorf("notification: unknown icon %q", opts.Icon)
 		}
-		x = icon.width + 2
+		icon = &NotificationIcon{Asset: NotificationAsset{StockPath: stock.path}, Width: stock.width, Height: stock.width}
+	}
+	if icon != nil {
+		if err := icon.validate(); err != nil {
+			return DisplayDrawParams{}, err
+		}
+		x = icon.Width + 2
 		params.Elements = append(params.Elements, ImageElement{
 			ElementBase: ElementBase{ID: "10", Display: DisplayFront, Y: 8, Align: AlignMidLeft, Timeout: opts.Duration},
-			StockPath:   icon.path,
+			Path:        icon.Asset.Path,
+			StockPath:   icon.Asset.StockPath,
 		})
 	}
 	type textLine struct {
@@ -148,13 +165,21 @@ func BuildNotification(text string, opts NotificationOptions) (DisplayDrawParams
 // application name. If drawing fails, sound is not played. A sound error can
 // occur after a successful draw; these are two separate device requests.
 func (c *Client) Notify(ctx context.Context, text string, opts NotificationOptions) error {
-	var sound string
-	if opts.Sound != "" {
-		var ok bool
-		sound, ok = sounds[opts.Sound]
+	if opts.Sound != "" && opts.CustomSound != nil {
+		return fmt.Errorf("notification: select either Sound or CustomSound")
+	}
+	var sound NotificationAsset
+	if opts.CustomSound != nil {
+		sound = *opts.CustomSound
+		if err := sound.validate("sounds"); err != nil {
+			return err
+		}
+	} else if opts.Sound != "" {
+		path, ok := sounds[opts.Sound]
 		if !ok {
 			return fmt.Errorf("notification: unknown sound %q", opts.Sound)
 		}
+		sound.StockPath = path
 	}
 	params, err := BuildNotification(text, opts)
 	if err != nil {
@@ -180,8 +205,8 @@ func (c *Client) Notify(ctx context.Context, text string, opts NotificationOptio
 	if err := c.DisplayDraw(ctx, params); err != nil {
 		return err
 	}
-	if sound != "" {
-		return c.AudioPlay(ctx, AudioPlayParams{ApplicationName: params.ApplicationName, StockPath: sound})
+	if sound.Path != "" || sound.StockPath != "" {
+		return c.AudioPlay(ctx, AudioPlayParams{ApplicationName: params.ApplicationName, Path: sound.Path, StockPath: sound.StockPath})
 	}
 	return nil
 }
