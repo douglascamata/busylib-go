@@ -53,6 +53,22 @@ func (c *Client) DisplayClear(ctx context.Context, applicationName string) error
 	return c.do(ctx, request{method: http.MethodDelete, path: "/display/draw", query: q}, nil)
 }
 
+// DisplayElementsDelete removes the selected elements of an application.
+// An empty elementIDs slice does nothing. Requires API 27.3.0 or newer.
+func (c *Client) DisplayElementsDelete(ctx context.Context, applicationName string, elementIDs []string) error {
+	if len(elementIDs) == 0 {
+		return nil
+	}
+	req, err := jsonRequest(http.MethodDelete, "/display/draw", map[string][]string{"element_ids": elementIDs})
+	if err != nil {
+		return err
+	}
+	// Firmware 1.2.4 ignores application_name in the body. The query works
+	// on both released and development firmware.
+	req.query = url.Values{"application_name": {applicationName}}
+	return c.do(ctx, req, nil)
+}
+
 // DisplayBrightnessGet returns the brightness setting.
 func (c *Client) DisplayBrightnessGet(ctx context.Context) (*DisplayBrightnessInfo, error) {
 	var out DisplayBrightnessInfo

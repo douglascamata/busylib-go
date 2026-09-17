@@ -93,6 +93,10 @@ err = bar.DisplayDraw(ctx, busybar.DisplayDrawParams{
 Method names follow the TypeScript library: `SystemStatusGet`, `DisplayDraw`,
 `StorageWrite`, `WifiConnect`, and so on. Every method takes a `context.Context`.
 
+`DisplayClear(ctx, applicationName)` clears an application's whole drawing.
+Use `DisplayElementsDelete(ctx, applicationName, []string{"icon"})` to remove
+only selected element IDs (API 27.3.0+). An empty selection does nothing.
+
 ### Connection
 
 `Addr` accepts an IP, a host name, or a full URL. Without a scheme, `http://`
