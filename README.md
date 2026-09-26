@@ -556,12 +556,16 @@ delivers updates; it does not create a background timer or mutable dashboard cac
 ## Development
 
 ```bash
-make build           # compile every package
-make test            # tests with the race detector
-make smoke-test      # boots busybar-emulator and runs the smoke tests
-make lint            # gofmt, go vet, golangci-lint
-make generate-proto  # regenerate statestream/pb from proto/
-make update-protos   # fetch the latest bsb-protobuf schemas, then regenerate
+make build            # compile every package
+make test             # tests with the race detector
+make smoke-test       # boots busybar-emulator and runs the smoke tests
+make lint             # gofmt, go vet, golangci-lint
+make generate-proto   # regenerate statestream/pb from proto/
+make update-protos    # fetch the latest bsb-protobuf schemas, then regenerate
+make change           # add a changelog fragment for a user-facing change
+make changelog        # preview the next version and its release notes
+make check-changes    # validate the changelog fragments
+make update-changelog # rebuild CHANGELOG.md from .changes/
 ```
 
 The smoke tests drive the HTTP client and the WebSocket stream against
@@ -578,6 +582,57 @@ PNG pixels and PCM samples, including all six audio input formats above. Python/
 can be regenerated with `python3 media/testdata/generate.py` (requires Pillow).
 
 Agent instructions are in [AGENTS.md](AGENTS.md).
+
+## Releasing
+
+The changelog is built with [Changie](https://changie.dev/) from fragments in
+`.changes/unreleased/`, one per user-facing change. Commit messages are not
+used, so a fragment can explain the change for library users. Changes with no
+user impact, such as CI or test updates, need no fragment.
+
+Add a fragment in the same commit as the change:
+
+```bash
+make change                                             # prompts for kind and text
+make change ARGS='--kind Fixed --body "Describe the fix"'
+```
+
+Pull requests fail the Changelog check when they add no fragment. PRs that
+only touch CI, tooling, tests, or docs (see the exempt paths in
+[changelog.yml](.github/workflows/changelog.yml)) pass without one. For other
+changes with no user impact, add the `skip-changelog` label to the PR.
+
+Kinds follow [Keep a Changelog](https://keepachangelog.com/): Added, Changed,
+Deprecated, Removed, Fixed, and Security. Fragments are plain YAML. Edit, merge,
+or delete them freely until the release.
+
+The kinds also choose the next version: Fixed and Security bump the patch
+version, and every other kind bumps the minor version. While the module is on
+v0, breaking changes bump the minor version too. Run `make changelog` to see
+the next version and its notes.
+
+To release, check the notes with `make changelog` and polish the fragments.
+Then run this on a clean, up-to-date `main`:
+
+```bash
+make prepare-release                  # automatic version
+make prepare-release VERSION=v0.3.0   # explicit version
+```
+
+The target batches the fragments into `.changes/<version>.md`, rebuilds
+`CHANGELOG.md`, and commits both as `Release <version>`. It never tags or
+pushes. It prints the commands for that, to run after reviewing the commit:
+
+```bash
+git tag -a v0.3.0 -m v0.3.0
+git push --atomic origin main v0.3.0
+```
+
+The Go module proxy picks up the new tag on its own. To change the notes,
+edit `.changes/<version>.md` and run `make update-changelog`, then amend the
+release commit, or commit the fix later for a published release.
+`CHANGELOG.md` is generated, so edits made directly to it are lost. To drop an
+unpushed release commit, run `git reset --hard HEAD~1`.
 
 ## License
 

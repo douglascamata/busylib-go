@@ -1,0 +1,32 @@
+# Changelog fragments live in .changes/unreleased until a release batches them.
+# See https://changie.dev/config/ for every option.
+changesDir: .changes
+unreleasedDir: unreleased
+headerPath: header.tpl.md
+changelogPath: CHANGELOG.md
+versionExt: md
+versionFormat: '## {{.Version}} - {{.Time.Format "2006-01-02"}}'
+kindFormat: '### {{.Kind}}'
+changeFormat: '- {{ .Body | replace "\n" "\n  " }}'
+# `auto` picks the bump for `changie next auto` and `changie batch auto`; the
+# highest one among the pending fragments wins. While on v0, breaking kinds
+# (Changed, Removed) bump the minor version. Set them to major after v1.0.0.
+kinds:
+  - label: Added
+    auto: minor
+  - label: Changed
+    auto: minor
+  - label: Deprecated
+    auto: minor
+  - label: Removed
+    auto: minor
+  - label: Fixed
+    auto: patch
+  - label: Security
+    auto: patch
+newlines:
+  beforeChangelogVersion: 1
+  beforeKind: 1
+  afterKind: 1
+  endOfVersion: 1
+envPrefix: CHANGIE_

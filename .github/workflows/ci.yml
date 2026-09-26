@@ -24,4 +24,5 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: make test
       - run: make lint
+      - run: make check-changes
       - run: make smoke-test

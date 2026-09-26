@@ -1,0 +1,54 @@
+name: Changelog
+
+# Pull requests must add a Changie fragment unless they only touch exempt paths
+# or carry the skip-changelog label. Label changes re-run this check without
+# re-running CI.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  fragment:
+    name: Changelog fragment
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The pull request merge commit; its first parent is the base branch.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+      - name: Require a fragment for user-facing changes
+        env:
+          # Changes to paths matching these patterns never need a fragment.
+          # One extended regular expression per line.
+          EXEMPT_PATHS: |-
+            ^\.github/
+            ^\.agents/
+            ^\.changes/
+            ^scripts/
+            ^(AGENTS|README|CHANGELOG)\.md$
+            ^\.changie\.yaml$
+            ^\.gitignore$
+            ^\.golangci\.yml$
+            ^LICENSE$
+            ^Makefile$
+            _test\.go$
+            (^|/)testdata/
+        run: |
+          if git diff --name-only --diff-filter=A HEAD^1 HEAD | grep -qE '^\.changes/unreleased/[^/]+\.yaml$'; then
+            echo "Found a changelog fragment."
+            exit 0
+          fi
+          relevant="$(git diff --name-only HEAD^1 HEAD | grep -vE -e "$EXEMPT_PATHS" || true)"
+          if [ -z "$relevant" ]; then
+            echo "Only exempt paths changed; no fragment needed."
+            exit 0
+          fi
+          echo "::error title=Missing changelog fragment::Add one with make change, or apply the skip-changelog label if this change has no user impact."
+          echo "Changed files that need a fragment:"
+          echo "$relevant"
+          exit 1
