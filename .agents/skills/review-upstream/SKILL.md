@@ -17,8 +17,10 @@ to cross-check behavior and cover gaps in Python.
 
 ## Gather the evidence
 
-1. Read the latest completed review for each source and the README's intentional
-   differences. Start with Python unless the request names another source.
+1. Read the latest completed review for each source and the intentional
+   differences in
+   [FEATURES.md](../../../FEATURES.md#differences-from-busylib-ts).
+   Start with Python unless the request names another source.
    Establish each source's last reviewed commit, review scope, and target revision.
    A TypeScript review does not establish a Python baseline.
    Ask for a missing target. Do not call a dependency pin a completed review:

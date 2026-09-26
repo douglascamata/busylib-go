@@ -8,8 +8,8 @@ Add a Changie fragment for every user-facing change, in the same commit:
 `make change ARGS='--kind Fixed --body "..."'`. Write the body for library
 users, not as a commit summary. Skip it for CI, test, and tooling changes.
 CI fails pull requests that need a fragment and lack one. The
-`skip-changelog` label bypasses the check. See the Releasing section of the
-[README](README.md#releasing).
+`skip-changelog` label bypasses the check. See the
+[changelog section of CONTRIBUTING](CONTRIBUTING.md#changelog-fragments).
 
 ## Upstream reviews
 

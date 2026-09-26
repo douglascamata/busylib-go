@@ -35,7 +35,7 @@ jobs:
             ^\.agents/
             ^\.changes/
             ^scripts/
-            ^(AGENTS|README|CHANGELOG)\.md$
+            ^(AGENTS|CHANGELOG|CONTRIBUTING|FEATURES|README)\.md$
             ^\.changie\.yaml$
             ^\.gitignore$
             ^\.golangci\.yml$

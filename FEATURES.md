@@ -1,0 +1,536 @@
+# Features
+
+A tour of each busylib-go package, with examples. For a quick start, see the
+[README](README.md).
+
+- [Discovery](#discovery)
+- [HTTP API](#http-api)
+- [Notifications](#notifications)
+- [Image and audio conversion](#image-and-audio-conversion)
+- [StateStream](#statestream)
+- [Differences from busylib-ts](#differences-from-busylib-ts)
+
+## Discovery
+
+Import `github.com/douglascamata/busylib-go/discovery` to find nearby bars.
+The default scan lasts 1.5 seconds and uses all active multicast interfaces,
+including USB-Ethernet. It follows Python's `_http._tcp.local.` service and
+`busybar-` instance naming rules.
+
+```go
+devices, err := discovery.Discover(ctx, discovery.Options{})
+if err != nil {
+    log.Fatal(err)
+}
+for _, device := range devices {
+    ip, ok := device.Address(discovery.Any) // prefer USB, then Wi-Fi
+    if !ok {
+        continue
+    }
+    bar, err := busybar.New(busybar.Config{Addr: ip.String()})
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("%s (%s): %s\n", device.Name, device.ID, bar.Addr())
+}
+```
+
+Use `discovery.USB` or `discovery.WiFi` to select a specific connection.
+Results include the device name, ID, and unique IPv4 addresses. Like Python,
+addresses in `10.0.4.0/24` are classified as USB; other addresses are classified
+as Wi-Fi. Results are sorted by device ID, and addresses by IP.
+
+Set `Options.Timeout` for a longer scan or `Options.Interfaces` to select
+network interfaces. A normal scan timeout returns the devices found, with no
+error. Caller cancellation or a caller deadline returns partial results and
+the context error. A scan that finds nothing returns an empty slice.
+Discovery closes its sockets before returning.
+
+mDNS works on the local network and requires multicast traffic to be allowed.
+Discovery does not check HTTP reachability. Pass any required device password
+through `busybar.Config.HTTPAccessPassword` when creating the client.
+
+## HTTP API
+
+```go
+bar, err := busybar.New(busybar.Config{Addr: "10.0.4.20"})
+if err != nil {
+    log.Fatal(err)
+}
+
+status, err := bar.SystemStatusGet(ctx)
+
+err = bar.DisplayDraw(ctx, busybar.DisplayDrawParams{
+    ApplicationName: "hello",
+    Elements: []busybar.Element{
+        busybar.TextElement{
+            ElementBase: busybar.ElementBase{ID: "t", X: 36, Y: 8, Align: busybar.AlignCenter},
+            Text:        "Hello",
+            Font:        busybar.FontBold,
+        },
+    },
+})
+```
+
+Method names follow the TypeScript library: `SystemStatusGet`, `DisplayDraw`,
+`StorageWrite`, `WifiConnect`, and so on. Every method takes a `context.Context`.
+
+`DisplayClear(ctx, applicationName)` clears an application's whole drawing.
+Use `DisplayElementsDelete(ctx, applicationName, []string{"icon"})` to remove
+only selected element IDs (API 27.3.0+). An empty selection does nothing.
+
+`StorageWrite` replaces a file. `StorageAppend(ctx, path, data)` adds bytes to
+the end, or creates the file if it is missing (API 27.5.0+). Both send bytes
+unchanged; media conversion remains explicit.
+
+### Connection
+
+`Addr` accepts an IP, a host name, or a full URL. Without a scheme, `http://`
+is used, except for the BUSY proxy (`api.busy.app`), which defaults to
+`https://` and requires a `Token`.
+
+```go
+busybar.New(busybar.Config{})                                   // http://10.0.4.20
+busybar.New(busybar.Config{Addr: "192.168.13.37", HTTPAccessPassword: "1234"})
+busybar.New(busybar.Config{Addr: "api.busy.app", Token: token}) // remote proxy
+```
+
+`SetToken` and `SetHTTPAccessPassword` change credentials at runtime.
+
+### Timeouts and errors
+
+`Config.Timeout` (default 3s) applies to a call only when its context has no
+deadline. Use `context.WithTimeout` to override it per call.
+
+- A 4xx/5xx response returns a `*busybar.HTTPError` with `StatusCode`, `Body`
+  and a parsed `Message`.
+- A timeout returns `context.DeadlineExceeded`; a cancelled context returns
+  `context.Canceled`.
+- Network failures return the underlying `net/http` error.
+
+The client fetches `/version` once, sends the result as `X-API-Sem-Ver` on
+every request, and refreshes it and retries once when the device answers 405.
+Concurrent calls share an in-flight version fetch. Each waiting caller can
+cancel independently. A failed fetch is shared by its waiters; a later call
+can try again.
+
+### Display frames
+
+`DisplayScreenFrameGet` returns the device's raw bytes or RGBA. Turn RGBA into
+a standard image with `frame.ToImage`:
+
+```go
+rgba, err := bar.DisplayScreenFrameGet(ctx, frame.Front, busybar.FrameRGBA)
+w, h := frame.Dimensions(frame.Front)
+png.Encode(file, frame.ToImage(rgba, w, h))
+```
+
+### Timers
+
+`BusySnapshotGet` returns the last stored snapshot, not a live countdown.
+Use `StateAt` to calculate the current state without another request:
+
+```go
+snapshot, err := bar.BusySnapshotGet(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+state, err := snapshot.StateAt(time.Now())
+if err != nil {
+    log.Fatal(err)
+}
+if state.TimeLeftMs != nil {
+    fmt.Printf("%s: %d ms left\n", state.Phase, *state.TimeLeftMs)
+}
+```
+
+`Mode` uses the existing `BusyNotStarted`, `BusyInfinite`, `BusySimple`, and
+`BusyInterval` values. `IsRunning()` includes paused sessions. `TimeLeftMs` is
+nil for idle and infinite timers. `Phase` is work/rest for interval timers,
+work for infinite timers, and empty otherwise. `Interval` counts phases from
+zero: even is work, odd is rest. A session finishes after its final work phase.
+
+Calculation uses milliseconds, as in Python; the device display ticks in seconds.
+Use a clock aligned with the device. A future snapshot is not advanced. Paused
+snapshots keep their remaining time. With autostart off, the next phase waits
+for the user, unlike busylib-py 2.2.0's calculation. The result is an estimate
+from that snapshot; later button presses or writes require a new snapshot.
+
+To change or stop a timer, use `BusySnapshotSet` with a fresh
+`SnapshotTimestampMs`. Keep `BusyBarSettings` from the snapshot or profile.
+Go sends these settings for every snapshot type, including `BusyNotStarted`,
+and preserves required false and zero values. Use profile durations for interval
+timers; the device has minimum duration and cycle-count requirements.
+
+Use `BusySetPaused(ctx, true)` to pause, `BusySetPaused(ctx, false)` to resume,
+`BusyNextPhase(ctx)` to skip an interval phase, and `BusyStop(ctx)` to stop.
+`BusySessionThemeSet(ctx, "meeting")` changes only the running session's theme;
+the theme must already exist on the device. Each helper reads the snapshot,
+advances its remaining time, and writes a newer timestamp. Finished sessions
+return `ErrTimerNotRunning` for pause, resume, skip, and theme changes.
+Skipping the final work phase stops the session without adding a final rest.
+
+Serialize timer controls per device. These HTTP read/write operations are not
+atomic against other clients. Use a clock aligned with the device. Equal or
+slightly future timestamps advance by one millisecond so sequential writes are
+accepted; the raw `BusySnapshotSet` method still sends the timestamp you supply.
+
+Start the stored busy profile with `BusyStart(ctx, busybar.BusyStartParams{})`.
+Use `Slot: busybar.BusySlotCustom` for the other profile. Optional settings replace
+the selected profile's settings for this session only:
+
+```go
+err := bar.BusyStart(ctx, busybar.BusyStartParams{
+    TimerSettings: &busybar.BusyTimerSettings{
+        Type: busybar.BusySimple, TotalTimeMs: (45 * time.Minute).Milliseconds(),
+    },
+})
+```
+
+To start a card outside both slots, supply `CardID`, `TimerSettings`, and
+`BusyBarSettings`. The ID must have UUID form. This reads the latest snapshot
+for its timestamp, but does not read or write either stored profile.
+
+For a lasting change, edit the stored profile. The helper keeps fields you do
+not change, validates the timer, and supplies a newer profile timestamp:
+
+```go
+profile, err := bar.BusyProfileUpdate(ctx, busybar.BusySlotCustom, func(p *busybar.BusyProfile) error {
+    p.TimerSettings = busybar.BusyTimerSettings{
+        Type: busybar.BusyInterval,
+        IntervalWorkMs: (25 * time.Minute).Milliseconds(),
+        IntervalRestMs: (5 * time.Minute).Milliseconds(),
+        IntervalWorkCyclesCount: 4,
+        IsAutostartEnabled: false,
+    }
+    p.BusyBarSettings.Theme = "meeting"
+    return nil
+})
+```
+
+The callback runs synchronously. An error prevents the write. Replace the whole
+`TimerSettings` value when changing type; the helper supplies no duration defaults.
+`BusyStart` and `BusyProfileUpdate` check firmware limits: work/rest phases each
+5 minutes–8 hours, 2–35 work cycles, and countdowns from zero to 24 hours.
+Raw snapshot/profile setters remain available for callers managing the wire values.
+
+### Local access tokens
+
+Firmware 1.2.3 (API 27.5.0) adds separate, revocable credentials for integrations:
+
+```go
+token, err := bar.SettingsAccessTokenCreate(ctx, "my integration")
+if err != nil {
+    log.Fatal(err)
+}
+// Save token.Token securely now; the device returns the secret only once.
+bar.SetHTTPAccessPassword(token.Token)
+```
+
+Use `SettingsAccessTokensGet` to list metadata, `SettingsAccessTokenRevoke`
+with a `ShortID` to revoke one token, or `SettingsAccessTokensDeleteAll` to
+revoke all. Older firmware returns an HTTP error for unsupported endpoints.
+`HTTPAccessPassword` accepts a device PIN or local token through `X-API-Token`.
+`Config.Token` remains the separate cloud bearer token.
+
+## Notifications
+
+`Client.Notify` draws a front-display notification and then plays its
+optional sound. `busybar.BuildNotification` returns editable `DisplayDrawParams`
+without network calls or sound playback.
+
+```go
+err := bar.Notify(ctx, "Laundry done", busybar.NotificationOptions{
+    Line2: "Ready to collect",
+    Icon: "check",
+    Sound: "event",
+    Duration: 10, // seconds; zero stays until cleared
+    ApplicationName: "laundry",
+})
+```
+
+The default font is small. One line supports tiny, small, normal, condensed,
+bold, large, and extra_large; two lines support the first five. Layout offsets
+and asset paths follow busylib-py. Long lines scroll using an approximate
+character budget. Colors use `#RRGGBBAA` through `Color`, `Line2Color`, and
+`BackgroundColor`. Backgrounds need API 24.3.0; `Notify` checks the device version.
+When using `BuildNotification` directly, the caller is responsible for that version requirement.
+
+Icons: check, error, info, low_battery, clock, hourglass, start, setup.
+Sounds: event, reminder, volume. Priority defaults to 50;
+`busybar.NotificationPriorityInterrupt` (91) places the message above a Busy session.
+Clear it with `bar.DisplayClear(ctx, "laundry")`. Sound uses a separate request:
+a draw error prevents sound, while a sound error can follow a successful draw.
+
+### Upload custom icons and sounds
+
+Upload the files with `AssetsUpload`, then select them with `CustomIcon` and
+`CustomSound`. Use the same `ApplicationName` for upload, icon lookup, and
+notification. Each `NotificationAsset.Path` is the `File` name passed to upload,
+not a local file path or a full device path.
+
+This example reads a **16×16 PNG icon** and an MP3 from a local `assets/` folder.
+It uses `os.ReadFile` and the `github.com/douglascamata/busylib-go/media` package.
+[Audio conversion](#audio) requires FFmpeg on `PATH`.
+
+```go
+const app = "laundry"
+
+iconBytes, err := os.ReadFile("assets/done.png")
+if err != nil {
+    log.Fatal(err)
+}
+// Keep the icon's small dimensions. Default conversion targets a full display.
+iconAsset, err := media.ConvertImage("done.png", iconBytes, media.ImageOptions{
+    NoScale: true, NoCrop: true,
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+soundBytes, err := os.ReadFile("assets/ding.mp3")
+if err != nil {
+    log.Fatal(err)
+}
+soundAsset, err := media.ConvertAudio(ctx, "ding.mp3", soundBytes)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Upload converted bytes under the names returned by the converters.
+for _, asset := range []media.Asset{iconAsset, soundAsset} {
+    if err := bar.AssetsUpload(ctx, busybar.AssetsUploadParams{
+        ApplicationName: app, File: asset.Name, Data: asset.Data,
+    }); err != nil {
+        log.Fatal(err)
+    }
+}
+
+// Read the uploaded icon's dimensions so Notify can place text beside it.
+icon, err := bar.NotificationIconGet(ctx, app, busybar.NotificationAsset{
+    Path: iconAsset.Name,
+})
+if err != nil {
+    log.Fatal(err)
+}
+if err := bar.Notify(ctx, "Laundry done", busybar.NotificationOptions{
+    ApplicationName: app,
+    CustomIcon: icon,
+    CustomSound: &busybar.NotificationAsset{Path: soundAsset.Name},
+    Duration: 10,
+}); err != nil {
+    log.Fatal(err)
+}
+```
+
+Here the uploaded names are `done.png` and `ding.wav`. The converters return
+these names; use them instead of the source names. `AssetsUpload` sends bytes
+unchanged. `ConvertAudio` produces the device's headerless PCM audio, even though
+its output name ends in `.wav`. A regular WAV file also needs conversion.
+
+Upload once and reuse the icon and sound references in later `Notify` calls.
+Upload again when the files change, and repeat `NotificationIconGet` if the icon
+changes. `Notify` does not upload files or read their dimensions. It sends the
+draw request, then the optional sound request.
+
+`NotificationIconGet` reads PNG or firmware `.image` dimensions. Icons must fit
+within 69×16 pixels to leave room for text. Prepare a small icon before upload;
+the helper does not resize it. If you know the dimensions, you can skip that
+device read and pass this value to `CustomIcon` in `Notify` or `BuildNotification`:
+
+```go
+icon := &busybar.NotificationIcon{
+    Asset: busybar.NotificationAsset{Path: "done.png"},
+    Width: 16, Height: 16,
+}
+```
+
+You can mix a custom icon with a sound alias, or an icon alias with a custom
+sound. Do not set both `Icon` and `CustomIcon`, or both `Sound` and `CustomSound`.
+For files already supplied by the firmware, use `StockPath` instead of `Path`;
+no upload is needed. A stock path must name a file in `shared/images/` or
+`shared/sounds/`. Other stock directories are not supported by these endpoints.
+
+## Image and audio conversion
+
+Import `github.com/douglascamata/busylib-go/media`. Each converter takes file
+bytes (for example, from `os.ReadFile`) and returns an `Asset` with `Name` and
+`Data`. Use that name both for upload and for display or playback.
+`AssetsUpload` and `StorageWrite` send bytes unchanged; conversion is explicit.
+
+### Images
+
+`ConvertImage` follows busylib-py's image recipe. It reads PNG, JPEG, BMP,
+TIFF, WebP and static GIF and produces PNG. The zero-value `ImageOptions`
+selects the front display (72 × 16), with scaling and center cropping enabled.
+Use `Display: frame.Back` for the back display (160 × 80).
+
+When either source dimension exceeds the display, it scales with Lanczos
+using the larger width/height ratio. This covers the display before cropping.
+The center crop runs only when both resulting dimensions fit the target.
+Small images stay small; an image with only one small dimension can grow.
+`NoScale` and `NoCrop` disable these steps independently.
+
+Animation is rejected. EXIF orientation and color-profile processing are not
+applied. PNG encoding and pixel rounding can differ from Pillow, but the sizing
+rules match Python. Image conversion does not require FFmpeg.
+
+```go
+asset, err := media.ConvertImage(
+ "photo.jpg", 
+ imageBytes, 
+ media.ImageOptions{Display: frame.Back},
+)
+if err != nil {
+    log.Fatal(err)
+}
+if err := bar.AssetsUpload(ctx, busybar.AssetsUploadParams{
+    ApplicationName: "demo", File: asset.Name, Data: asset.Data,
+}); err != nil {
+    log.Fatal(err)
+}
+if err := bar.DisplayDraw(ctx, busybar.DisplayDrawParams{
+    ApplicationName: "demo",
+    Elements: []busybar.Element{
+        busybar.ImageElement{
+            ElementBase: busybar.ElementBase{ID: "photo", Display: busybar.DisplayBack},
+            Path:        asset.Name,
+        },
+    },
+}); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Audio
+
+**Install FFmpeg and make sure `ffmpeg` is on `PATH`.** The
+[ffmpeg-go](https://github.com/u2takey/ffmpeg-go) wrapper does not install it.
+For example, use `brew install ffmpeg` on macOS or `sudo apt install ffmpeg`
+on Debian/Ubuntu. Check the installation with `ffmpeg -version`.
+
+`ConvertAudio` uses FFmpeg's default audio stream selection, mixes to mono, and resamples
+it to 44.1 kHz. Supported inputs depend on your FFmpeg build; the tests cover
+WAV, MP3, OGG, AAC, M4A and FLAC. The context cancels conversion. Temporary
+input files are removed when the call returns.
+
+The result is **raw signed 16-bit little-endian PCM with a `.wav` name**,
+matching [busylib-py](https://github.com/busy-app/busylib-py/blob/main/src/busylib/converter/audio.py).
+Despite that extension, there is no WAV header. Volume is not normalized.
+Direct `ConvertAudio` calls with `.raw` or `.pcm` input keep the bytes unchanged
+and change the extension to `.wav`, without running FFmpeg. Such input must
+already use the device's PCM format.
+
+```go
+asset, err := media.ConvertAudio(ctx, "alert.mp3", audioBytes)
+if err != nil {
+    log.Fatal(err)
+}
+if err := bar.AssetsUpload(ctx, busybar.AssetsUploadParams{
+    ApplicationName: "demo", File: asset.Name, Data: asset.Data,
+}); err != nil {
+    log.Fatal(err)
+}
+if err := bar.AudioPlay(ctx, busybar.AudioPlayParams{
+    ApplicationName: "demo", Path: asset.Name,
+}); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Select a converter by file extension
+
+```go
+media.ConvertForStorage(ctx, filename, data)
+```
+
+The snippet follows Python's dispatcher:
+
+- JPG, JPEG, PNG, BMP, TIF, TIFF and WebP use default image options.
+- MP3, OGG, AAC, M4A, FLAC and WAV use the audio converter.
+- GIF, MOV, MP4, MKV, AVI and WebM return `media.ErrUnsupported`.
+- Unknown extensions, including RAW and PCM, keep their name and bytes.
+
+Extension matching ignores case. Known formats return an error if conversion
+fails. To convert a static GIF or select the back display, call `ConvertImage`
+directly. Use `errors.Is(err, media.ErrUnsupported)` to identify unsupported
+conversions. Image and audio decoders can return other errors for unsupported
+encodings within those file formats.
+
+## StateStream
+
+```go
+stream, err := statestream.NewLocal(statestream.Options{Addr: "10.0.4.20"})
+
+runCtx, cancel := context.WithCancel(ctx)
+done := make(chan error, 1)
+go func() {
+    done <- stream.Run(runCtx, statestream.Callbacks{
+        Ready: func() { fmt.Println("connected") },
+        Data: func(st *statestream.State) {
+            for _, u := range st.Updates {
+                switch u.Kind {
+                case statestream.KindInput:
+                    fmt.Println(u.GetInput())
+                case statestream.KindFrame:
+                    img := u.Frame.Image() // already RGBA
+                }
+            }
+        },
+        Status: func(st statestream.Status) { fmt.Println(st.Main, st.Connection, st.Data) },
+        Error:  func(e *statestream.Error) { fmt.Println(e.Code, e.Message) },
+    })
+}()
+
+// Cancel the stream and wait for Run to return.
+cancel()
+err = <-done
+```
+
+`Run` blocks for the stream lifetime. Cancel its context to stop it. The caller
+starts a goroutine when it needs other work to continue. `Ready` fires once
+per `Run` when the stream is connected (and, for remote streams,
+authenticated). `Run` reconnects on its own, up to `MaxReconnectAttempts`. It
+returns `CodeReconnectFailed` when it gives up. `Status().Data` flips to
+`DataStale` when an open connection stops sending messages for `DataTimeout`.
+It is `DataNone` while reconnecting. Callbacks run one at a time on the `Run`
+goroutine. Cancellation can race with a callback that is about to start. No
+callback fires after `Run` returns.
+Token and subscription commands are sent in order. Callbacks can call these
+methods. Each remote connection must authenticate within `ConnectTimeout`,
+including connections opened after a drop.
+
+Stream errors keep their underlying cause. Use `errors.Is` or `errors.As`
+to inspect transport, token-provider, and decoding errors.
+
+Each `Update` embeds the decoded protobuf message, so `u.GetPower()`,
+`u.GetWifi()` and friends are available. The `statestream.BatteryStatus`,
+`WifiSecurity`, `BleStatus`, ... functions map protobuf enums to the string
+values the HTTP API uses.
+
+Timer updates also provide `u.Timer`, a decoded `*busybar.BusySnapshot`. Use
+`u.Timer.StateAt(time.Now())` for the same calculation as HTTP snapshots.
+PLAIN and GZIP timer JSON are supported. Invalid timer data reports
+`CodeDecodeError`, leaves `Timer` nil, and does not discard other updates or
+stop the stream. `statestream.DecodeTimer` is also available for raw protobuf timers.
+
+For continuous tracking, read `BusySnapshotGet` once, then retain the newest
+`u.Timer` by `SnapshotTimestampMs` and recalculate on your own display ticker.
+Process snapshots and ticks on one goroutine, or protect shared state with a
+mutex. For remote streams, keep one snapshot per `State.BarID`. The stream
+delivers updates; it does not create a background timer or mutable dashboard cache.
+
+`statestream.NewRemote` connects to the BUSY cloud with a `Token`, an optional
+`TokenProvider` for refreshes, and `Subscribe(guid)` per device.
+
+## Differences from busylib-ts
+
+- Requests take a `context.Context` instead of `timeout`/`signal` options.
+- Mutating calls return only `error`; the `{"result":"OK"}` body is dropped.
+- `ScreenRenderer` (WebGL) has no Go counterpart. `frame.ToImage` gives you an
+  `image.RGBA` to render however you like.
+- `StateStream.Run` blocks. The caller owns its goroutine and cancellation.
+- `Status().Data` is `DataNone` while reconnecting. busylib-ts keeps its
+  data timer across reconnects and reports `STALE` instead.
+- Remote authentication has a deadline on every connection. The TypeScript
+  connection timer applies to startup.
