@@ -5,8 +5,9 @@ PROTO_REPO := https://github.com/flipperdevices/bsb-protobuf.git
 PROTOS     := $(shell cd $(PROTO_DIR) && find . -name '*.proto' | sed 's|^\./||' | sort)
 GOLANGCI   := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 CHANGIE    := go run github.com/miniscruff/changie@v1.26.0
+ZIZMOR     := zizmor
 
-.PHONY: build test smoke-test lint generate-proto update-protos change changelog check-changes update-changelog prepare-release
+.PHONY: build test smoke-test lint lint-actions generate-proto update-protos change changelog check-changes update-changelog prepare-release
 
 ## build: compile every package (this is a library, there is no binary)
 build:
@@ -20,11 +21,17 @@ test:
 smoke-test:
 	scripts/smoke.sh
 
-## lint: gofmt, go vet and golangci-lint
-lint:
+## lint: gofmt, go vet, golangci-lint and lint-actions
+lint: lint-actions
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 	go vet -tags smoke ./...
 	$(GOLANGCI) run --build-tags smoke ./...
+
+## lint-actions: audit the GitHub Actions workflows with zizmor (CI runs this through lint)
+# Online audits need a GitHub token; without one zizmor runs offline.
+lint-actions:
+	@token="$${GH_TOKEN:-$$(gh auth token 2>/dev/null || true)}"; \
+	env $${token:+GH_TOKEN="$$token"} $(ZIZMOR) --persona=pedantic .github/workflows
 
 ## generate-proto: regenerate $(PB_DIR) from $(PROTO_DIR) (needs protoc and protoc-gen-go)
 generate-proto:

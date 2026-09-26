@@ -559,7 +559,8 @@ delivers updates; it does not create a background timer or mutable dashboard cac
 make build            # compile every package
 make test             # tests with the race detector
 make smoke-test       # boots busybar-emulator and runs the smoke tests
-make lint             # gofmt, go vet, golangci-lint
+make lint             # gofmt, go vet, golangci-lint, lint-actions
+make lint-actions     # audit the GitHub Actions workflows with zizmor
 make generate-proto   # regenerate statestream/pb from proto/
 make update-protos    # fetch the latest bsb-protobuf schemas, then regenerate
 make change           # add a changelog fragment for a user-facing change
