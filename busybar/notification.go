@@ -1,4 +1,4 @@
-// Layouts and stock assets follow busylib-py 2.1.0 (MIT, Flipper Devices).
+// Layouts and stock assets follow busylib-py 2.6.1 (MIT, Flipper Devices).
 package busybar
 
 import (
@@ -69,7 +69,7 @@ type fontLayout struct {
 // intentionally extend past the anchor: normal/bold use -1 and 17 for two lines.
 var fonts = map[Font]fontLayout{
 	FontTiny:       {8, 1, 15, true},
-	FontSmall:      {7, 0, 16, true},
+	FontSmall:      {7, 0, 17, true},
 	FontNormal:     {7, -1, 17, true},
 	FontCondensed:  {7, -1, 17, true},
 	FontBold:       {7, -1, 17, true},

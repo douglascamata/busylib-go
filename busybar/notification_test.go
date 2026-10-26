@@ -12,7 +12,7 @@ import (
 )
 
 func TestBuildLayouts(t *testing.T) {
-	// Reference offsets and asset widths: busylib-py 2.1.0 notification.py.
+	// Reference offsets and asset widths: busylib-py 2.6.1 notification.py.
 	for _, tc := range []struct {
 		name, text        string
 		opts              busybar.NotificationOptions
@@ -46,7 +46,7 @@ func TestBuildLayouts(t *testing.T) {
 		font        busybar.Font
 		top, bottom int
 	}{
-		{busybar.FontTiny, 1, 15}, {busybar.FontSmall, 0, 16},
+		{busybar.FontTiny, 1, 15}, {busybar.FontSmall, 0, 17},
 		{busybar.FontNormal, -1, 17}, {busybar.FontCondensed, -1, 17}, {busybar.FontBold, -1, 17},
 	} {
 		params, err := busybar.BuildNotification("First", busybar.NotificationOptions{Line2: "Second", Font: tc.font, Duration: 5, Color: "#FF0000FF", Line2Color: "#00FF00FF"})
@@ -57,6 +57,26 @@ func TestBuildLayouts(t *testing.T) {
 		if first.Y != tc.top || first.Align != busybar.AlignTopLeft || second.Y != tc.bottom || second.Align != busybar.AlignBottomLeft || first.Timeout != 5 || second.Timeout != 5 || first.Color != "#FF0000FF" || second.Color != "#00FF00FF" {
 			t.Fatalf("%s: %+v %+v", tc.font, first, second)
 		}
+	}
+}
+
+func TestBuildSmallFontAccentSpacing(t *testing.T) {
+	params, err := busybar.BuildNotification("FIRST", busybar.NotificationOptions{Line2: "ЙЁg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := params.Elements[0].(busybar.TextElement), params.Elements[1].(busybar.TextElement)
+	// Hardware measurements from busylib-py PR 134: the capital body ends
+	// six rows below the top anchor. The bottom-aligned descender ends two
+	// rows above its anchor, seven rows below the accent.
+	firstBodyBottom := first.Y + 6
+	secondDescender := second.Y - 2
+	secondAccent := secondDescender - 7
+	if secondAccent < firstBodyBottom+2 {
+		t.Fatalf("accent row %d needs a blank row below the first body at %d", secondAccent, firstBodyBottom)
+	}
+	if secondDescender > 15 {
+		t.Fatalf("descender row %d exceeds the 16-row panel", secondDescender)
 	}
 }
 
