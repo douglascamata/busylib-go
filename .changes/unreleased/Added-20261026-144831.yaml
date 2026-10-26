@@ -1,0 +1,3 @@
+kind: Added
+body: Set `NotificationOptions.Line2Font` to use a separate font for the second notification line.
+time: 2026-10-26T14:48:31.383943+01:00
