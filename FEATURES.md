@@ -250,10 +250,13 @@ err := bar.Notify(ctx, "Laundry done", busybar.NotificationOptions{
 ```
 
 The default font is small. One line supports tiny, small, normal, condensed,
-bold, large, and extra_large; two lines support the first five. Layout offsets
-and asset paths follow busylib-py. Long lines scroll using an approximate
-character budget. Colors use `#RRGGBBAA` through `Color`, `Line2Color`, and
-`BackgroundColor`. Backgrounds need API 24.3.0; `Notify` checks the device version.
+bold, large, and extra_large; two lines support the first five. `Font` applies
+to both lines. Set `Line2Font` to give the second line its own font, such as
+`Font: busybar.FontBold, Line2Font: busybar.FontTiny`. Each line uses the offset
+for its own font. Layout offsets and asset paths follow busylib-py. Long lines
+scroll using an approximate character budget. Colors use `#RRGGBBAA` through
+`Color`, `Line2Color`, and `BackgroundColor`. Backgrounds need API 24.3.0;
+`Notify` checks the device version.
 When using `BuildNotification` directly, the caller is responsible for that version requirement.
 
 Icons: check, error, info, low_battery, clock, hourglass, start, setup.

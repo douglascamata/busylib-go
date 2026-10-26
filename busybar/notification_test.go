@@ -12,13 +12,14 @@ import (
 )
 
 func TestBuildLayouts(t *testing.T) {
-	// Reference offsets and asset widths: busylib-py 2.1.0 notification.py.
+	// Reference offsets and asset widths: busylib-py 2.6.1 notification.py.
 	for _, tc := range []struct {
 		name, text        string
 		opts              busybar.NotificationOptions
 		x, y, width, rate int
 	}{
 		{"plain small", "Ready", busybar.NotificationOptions{}, 2, 7, 0, 0},
+		{"single line keeps its font", "Ready", busybar.NotificationOptions{Line2Font: busybar.FontTiny}, 2, 7, 0, 0},
 		{"tiny centered", "Ready", busybar.NotificationOptions{Font: busybar.FontTiny}, 2, 8, 0, 0},
 		{"extra large centered", "Ready", busybar.NotificationOptions{Font: busybar.FontExtraLarge}, 2, 8, 0, 0},
 		{"narrow icon", "Ready", busybar.NotificationOptions{Icon: "clock"}, 7, 7, 0, 0},
@@ -46,7 +47,7 @@ func TestBuildLayouts(t *testing.T) {
 		font        busybar.Font
 		top, bottom int
 	}{
-		{busybar.FontTiny, 1, 15}, {busybar.FontSmall, 0, 16},
+		{busybar.FontTiny, 1, 15}, {busybar.FontSmall, 0, 17},
 		{busybar.FontNormal, -1, 17}, {busybar.FontCondensed, -1, 17}, {busybar.FontBold, -1, 17},
 	} {
 		params, err := busybar.BuildNotification("First", busybar.NotificationOptions{Line2: "Second", Font: tc.font, Duration: 5, Color: "#FF0000FF", Line2Color: "#00FF00FF"})
@@ -54,15 +55,69 @@ func TestBuildLayouts(t *testing.T) {
 			t.Fatal(err)
 		}
 		first, second := params.Elements[0].(busybar.TextElement), params.Elements[1].(busybar.TextElement)
+		if first.Font != tc.font || second.Font != tc.font {
+			t.Fatalf("default second-line font: %+v %+v", first, second)
+		}
 		if first.Y != tc.top || first.Align != busybar.AlignTopLeft || second.Y != tc.bottom || second.Align != busybar.AlignBottomLeft || first.Timeout != 5 || second.Timeout != 5 || first.Color != "#FF0000FF" || second.Color != "#00FF00FF" {
 			t.Fatalf("%s: %+v %+v", tc.font, first, second)
 		}
 	}
 }
 
+func TestBuildSmallFontAccentSpacing(t *testing.T) {
+	params, err := busybar.BuildNotification("FIRST", busybar.NotificationOptions{Line2: "ЙЁg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := params.Elements[0].(busybar.TextElement), params.Elements[1].(busybar.TextElement)
+	// Hardware measurements from busylib-py PR 134: the capital body ends
+	// six rows below the top anchor. The bottom-aligned descender ends two
+	// rows above its anchor, seven rows below the accent.
+	firstBodyBottom := first.Y + 6
+	secondDescender := second.Y - 2
+	secondAccent := secondDescender - 7
+	if secondAccent < firstBodyBottom+2 {
+		t.Fatalf("accent row %d needs a blank row below the first body at %d", secondAccent, firstBodyBottom)
+	}
+	if secondDescender > 15 {
+		t.Fatalf("descender row %d exceeds the 16-row panel", secondDescender)
+	}
+}
+
+func TestBuildLineFonts(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		font, second  busybar.Font
+		wantFirstFont busybar.Font
+		top, bottom   int
+	}{
+		{"bold over tiny", busybar.FontBold, busybar.FontTiny, busybar.FontBold, -1, 15},
+		{"tiny over bold", busybar.FontTiny, busybar.FontBold, busybar.FontTiny, 1, 17},
+		{"default over tiny", "", busybar.FontTiny, busybar.FontSmall, 0, 15},
+		{"tiny over small", busybar.FontTiny, busybar.FontSmall, busybar.FontTiny, 1, 17},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params, err := busybar.BuildNotification("MEETING", busybar.NotificationOptions{
+				Line2: "until 15:30", Font: tc.font, Line2Font: tc.second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, second := params.Elements[0].(busybar.TextElement), params.Elements[1].(busybar.TextElement)
+			if first.Font != tc.wantFirstFont || first.Y != tc.top || first.Align != busybar.AlignTopLeft || second.Font != tc.second || second.Y != tc.bottom || second.Align != busybar.AlignBottomLeft {
+				t.Fatalf("line fonts or anchors: %+v %+v", first, second)
+			}
+		})
+	}
+}
+
 func TestBuildRejectsInvalidLayout(t *testing.T) {
 	for _, opts := range []busybar.NotificationOptions{
 		{Font: busybar.FontGlobal}, {Font: busybar.FontLarge, Line2: "Second"},
+		{Line2Font: busybar.FontGlobal, Line2: "Second"},
+		{Line2Font: busybar.Font("missing"), Line2: "Second"},
+		{Line2Font: busybar.FontLarge, Line2: "Second"},
+		{Line2Font: busybar.FontExtraLarge, Line2: "Second"},
 		{Icon: "missing"}, {Duration: -1}, {Priority: 101}, {Priority: -1},
 	} {
 		if _, err := busybar.BuildNotification("text", opts); err == nil {
@@ -122,6 +177,7 @@ func TestNotifyWireAndFailureOrdering(t *testing.T) {
 			}
 			err = client.Notify(context.Background(), "Laundry done", busybar.NotificationOptions{
 				Line2: "Ready", Icon: "check", Sound: tc.sound, BackgroundColor: "#0000FFFF", Duration: 10,
+				Font: busybar.FontBold, Line2Font: busybar.FontTiny,
 				Priority: busybar.NotificationPriorityInterrupt, ApplicationName: "laundry",
 			})
 			if (err != nil) != tc.wantErr {
@@ -145,6 +201,10 @@ func TestNotifyWireAndFailureOrdering(t *testing.T) {
 			icon := elements[1].(map[string]any)
 			if icon["stock_path"] != "shared/images/checkmark_front_8x8.image" {
 				t.Fatalf("icon %v", icon)
+			}
+			first, second := elements[2].(map[string]any), elements[3].(map[string]any)
+			if first["font"] != "bold" || first["y"] != float64(-1) || first["align"] != "top_left" || second["font"] != "tiny" || second["y"] != float64(15) || second["align"] != "bottom_left" {
+				t.Fatalf("wire fonts or anchors: %v %v", first, second)
 			}
 			for _, e := range elements {
 				if e.(map[string]any)["timeout"] != float64(10) {

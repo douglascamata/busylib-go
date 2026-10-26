@@ -1,4 +1,4 @@
-// Layouts and stock assets follow busylib-py 2.1.0 (MIT, Flipper Devices).
+// Layouts and stock assets follow busylib-py 2.6.1 (MIT, Flipper Devices).
 package busybar
 
 import (
@@ -20,8 +20,11 @@ type NotificationOptions struct {
 	Icon string
 	// CustomIcon selects an uploaded or shared icon. Do not combine it with Icon.
 	CustomIcon *NotificationIcon
-	// Font defaults to small. Large and extra_large support one line only.
-	Font       Font
+	// Font defaults to small and applies to both lines unless Line2Font is set.
+	// Large and extra_large support one line only.
+	Font Font
+	// Line2Font overrides the second line's font. Empty uses Font.
+	Line2Font  Font
 	Color      string
 	Line2Color string
 	// BackgroundColor requires device API 24.3.0 or newer.
@@ -69,7 +72,7 @@ type fontLayout struct {
 // intentionally extend past the anchor: normal/bold use -1 and 17 for two lines.
 var fonts = map[Font]fontLayout{
 	FontTiny:       {8, 1, 15, true},
-	FontSmall:      {7, 0, 16, true},
+	FontSmall:      {7, 0, 17, true},
 	FontNormal:     {7, -1, 17, true},
 	FontCondensed:  {7, -1, 17, true},
 	FontBold:       {7, -1, 17, true},
@@ -84,13 +87,19 @@ func BuildNotification(text string, opts NotificationOptions) (DisplayDrawParams
 	if opts.Font == "" {
 		opts.Font = FontSmall
 	}
-	layout, ok := fonts[opts.Font]
-	if !ok {
-		return DisplayDrawParams{}, fmt.Errorf("notification: unsupported font %q", opts.Font)
+	if opts.Line2Font == "" {
+		opts.Line2Font = opts.Font
 	}
-	if opts.Line2 != "" && !layout.twoLines {
-		return DisplayDrawParams{}, fmt.Errorf("notification: font %q does not fit two lines", opts.Font)
+	for _, font := range []Font{opts.Font, opts.Line2Font} {
+		layout, ok := fonts[font]
+		if !ok {
+			return DisplayDrawParams{}, fmt.Errorf("notification: unsupported font %q", font)
+		}
+		if opts.Line2 != "" && !layout.twoLines {
+			return DisplayDrawParams{}, fmt.Errorf("notification: font %q does not fit two lines", font)
+		}
 	}
+	layout := fonts[opts.Font]
 	if opts.Duration < 0 {
 		return DisplayDrawParams{}, fmt.Errorf("notification: duration must not be negative")
 	}
@@ -137,20 +146,21 @@ func BuildNotification(text string, opts NotificationOptions) (DisplayDrawParams
 	}
 	type textLine struct {
 		id, text, color string
+		font            Font
 		y               int
 		align           Align
 	}
 	lines := []textLine{
-		{"11", text, opts.Color, layout.singleY, AlignMidLeft},
+		{"11", text, opts.Color, opts.Font, layout.singleY, AlignMidLeft},
 	}
 	if opts.Line2 != "" {
 		lines[0].y, lines[0].align = layout.topY, AlignTopLeft
-		lines = append(lines, textLine{"12", opts.Line2, opts.Line2Color, layout.bottomY, AlignBottomLeft})
+		lines = append(lines, textLine{"12", opts.Line2, opts.Line2Color, opts.Line2Font, fonts[opts.Line2Font].bottomY, AlignBottomLeft})
 	}
 	for _, line := range lines {
 		element := TextElement{
 			ElementBase: ElementBase{ID: line.id, X: x, Y: line.y, Display: DisplayFront, Align: line.align, Timeout: opts.Duration},
-			Text:        line.text, Font: opts.Font, Color: line.color,
+			Text:        line.text, Font: line.font, Color: line.color,
 		}
 		available := 72 - x
 		if utf8.RuneCountInString(line.text) > max(1, 12*available/72) {
