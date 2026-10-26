@@ -233,6 +233,64 @@ revoke all. Older firmware returns an HTTP error for unsupported endpoints.
 `HTTPAccessPassword` accepts a device PIN or local token through `X-API-Token`.
 `Config.Token` remains the separate cloud bearer token.
 
+## JavaScript apps
+
+Firmware 1.3.1 (API 27.14.0) supports managing JavaScript apps on the bar.
+These methods need a local USB or Wi-Fi connection. The cloud proxy does not
+serve them. JavaScript runs on the bar; Go only sends the management requests.
+
+`AppsList` returns each app's ID, name, version, required API version, author,
+description, icon path, and debug flag. Use `AppsLaunch(ctx, appID)` to launch
+one and `AppsQuit(ctx)` to quit the running app. A higher-priority application
+can prevent launch. Launch confirms the request before script initialization
+finishes. Quitting when no app runs returns HTTP 409.
+
+Installation has two steps. `AppsStage` uploads a TAR or TGZ package and returns
+a single-use key. Its `Staged` field describes the new app. `Installed` describes
+the app it would replace, or is nil for a new app. Inspect these before installing.
+The archive must contain an app directory with `appmeta/manifest.json` inside it.
+
+```go
+packageBytes, err := os.ReadFile("my-app.tgz")
+if err != nil {
+    log.Fatal(err)
+}
+uploadCtx, cancel := context.WithTimeout(ctx, time.Minute)
+defer cancel()
+staged, err := bar.AppsStage(uploadCtx, packageBytes)
+if err != nil {
+    log.Fatal(err)
+}
+// Inspect staged.Staged and staged.Installed, then choose whether to install.
+if err := bar.AppsInstall(ctx, staged.InstallKey); err != nil {
+    log.Fatal(err)
+}
+```
+
+Use a longer context deadline for upload and unpacking when needed. Coordinate
+staging and installation per device: another stage replaces the previous key,
+including one sent by another client. `AppsRemove(ctx, appID)` removes an app
+and keeps its settings. Firmware 1.3.1 acknowledges quit before all shutdown work
+finishes. Removal immediately after quit can return HTTP 508; the client returns
+that error without a hidden retry.
+
+`AppsSettingsGet` returns the complete versioned settings document. `Values`
+maps field names to `json.RawMessage`, so JSON numbers and nested objects survive
+a read/write cycle. Use `encoding/json` to decode a field or set its JSON value:
+
+```go
+document, err := bar.AppsSettingsGet(ctx, "com.example.my-app")
+if err != nil {
+    log.Fatal(err)
+}
+document.Values["count"] = json.RawMessage(`0`)
+err = bar.AppsSettingsSet(ctx, "com.example.my-app", *document)
+```
+
+`AppsSettingsSet` replaces the whole document, including every schema field and
+the matching version. The device validates it and drops unknown keys.
+`AppsSettingsReset(ctx, appID)` restores the app's default values.
+
 ## Notifications
 
 `Client.Notify` draws a front-display notification and then plays its

@@ -1,0 +1,6 @@
+kind: Added
+body: >-
+  Manage JavaScript apps on local BUSY Bar devices: list, stage, install,
+  launch, quit, remove, and read, replace, or reset their settings.
+  Supported on firmware 1.3.1 (API 27.14.0).
+time: 2026-10-26T22:56:13.984225+01:00
