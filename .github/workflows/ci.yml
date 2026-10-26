@@ -24,9 +24,22 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          # Include the pinned Go tools in the module and build cache key.
+          cache-dependency-path: |
+            go.sum
+            Makefile
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "25.1.0"
+      - name: Cache lint downloads and analysis
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/golangci-lint
+          key: ${{ runner.os }}-${{ runner.arch }}-lint-${{ hashFiles('Makefile', 'go.mod', 'go.sum', '.golangci.yml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-lint-${{ hashFiles('Makefile', 'go.mod', 'go.sum', '.golangci.yml', '.github/workflows/ci.yml') }}-
       - name: Install FFmpeg for audio conversion tests
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install zizmor for make lint-actions
