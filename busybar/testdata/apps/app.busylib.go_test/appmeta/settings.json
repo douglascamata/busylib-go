@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "version": 1,
+  "fields": {
+    "enabled": {
+      "label": "Enabled",
+      "type": "boolean",
+      "default": true
+    },
+    "count": {
+      "label": "Count",
+      "type": "integer",
+      "default": 7,
+      "min": 0,
+      "max": 100
+    },
+    "details": {
+      "label": "Details",
+      "type": "group",
+      "fields": {
+        "label": {
+          "label": "Label",
+          "type": "string",
+          "default": "Go",
+          "max_length": 32
+        }
+      }
+    }
+  }
+}

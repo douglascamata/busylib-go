@@ -32,6 +32,17 @@ Run `go test -race -v ./media` with FFmpeg installed to check the converted
 PNG pixels and PCM samples, including all six audio input formats. Python/Pillow image references
 can be regenerated with `python3 media/testdata/generate.py` (requires Pillow).
 
+To test app management on a physical bar with firmware 1.3.1 or newer:
+
+```bash
+BUSYBAR_DEVICE_URL=http://10.0.4.20 go test -race -count=1 -v ./busybar -run '^TestAppsDeviceLifecycle$'
+```
+
+Set `BUSYBAR_DEVICE_TOKEN` if local access requires a PIN or token. This opt-in
+test installs and launches `app.busylib.go_test`, checks settings and removal,
+then removes its app files, settings, and startup marker. It refuses to overwrite that ID's
+existing files. Normal tests skip it. The emulator smoke suite does not run it.
+
 Agent instructions are in [AGENTS.md](AGENTS.md).
 
 ## Changelog fragments
